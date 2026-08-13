@@ -1,0 +1,10 @@
+<Window x:Class="MySnip.App.Windows.StickerWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStyle="None" AllowsTransparency="True" Background="Transparent"
+        ResizeMode="NoResize" ShowInTaskbar="False" Topmost="True"
+        SizeToContent="WidthAndHeight" MinWidth="40" MinHeight="40">
+  <Border x:Name="Frame" BorderBrush="#8027A7E7" BorderThickness="1" Background="Transparent">
+    <Image x:Name="StickerImage" Stretch="Fill" RenderOptions.BitmapScalingMode="HighQuality"/>
+  </Border>
+</Window>

@@ -1,0 +1,13 @@
+<Application x:Class="MySnip.App.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             ShutdownMode="OnExplicitShutdown">
+  <Application.Resources>
+    <SolidColorBrush x:Key="AccentBrush" Color="#FF27A7E7"/>
+    <Style TargetType="Button">
+      <Setter Property="Margin" Value="3"/>
+      <Setter Property="Padding" Value="9,5"/>
+      <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+  </Application.Resources>
+</Application>

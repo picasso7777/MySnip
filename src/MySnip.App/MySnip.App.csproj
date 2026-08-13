@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <AssemblyName>MySnip</AssemblyName>
+    <RootNamespace>MySnip.App</RootNamespace>
+    <ApplicationIcon>..\..\assets\MySnip.ico</ApplicationIcon>
+    <Version>0.1.0</Version>
+    <AssemblyVersion>0.1.0.0</AssemblyVersion>
+    <FileVersion>0.1.0.0</FileVersion>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishTrimmed>false</PublishTrimmed>
+    <PublishSingleFile>false</PublishSingleFile>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableHotReload>false</EnableHotReload>
+    <XamlDebuggingInformation>false</XamlDebuggingInformation>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\MySnip.Core\MySnip.Core.csproj" />
+  </ItemGroup>
+</Project>

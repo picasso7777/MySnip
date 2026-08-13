@@ -1,0 +1,234 @@
+<Window x:Class="MySnip.App.Windows.CaptureOverlayWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStyle="None" ResizeMode="NoResize" ShowInTaskbar="False" Topmost="True"
+        Background="Black" Cursor="Cross" KeyDown="Window_KeyDown" KeyUp="Window_KeyUp">
+  <Canvas x:Name="Root">
+    <Image x:Name="Screenshot" Canvas.Left="0" Canvas.Top="0" Stretch="None"/>
+    <Canvas x:Name="AnnotationCanvas" Background="Transparent" IsHitTestVisible="False"/>
+    <Canvas x:Name="MaskCanvas" IsHitTestVisible="False">
+      <Rectangle x:Name="MaskTop" Fill="#99000000"/><Rectangle x:Name="MaskLeft" Fill="#99000000"/>
+      <Rectangle x:Name="MaskRight" Fill="#99000000"/><Rectangle x:Name="MaskBottom" Fill="#99000000"/>
+      <Border x:Name="SelectionBorder" BorderBrush="#FF27A7E7" BorderThickness="2" Background="Transparent"/>
+      <TextBlock x:Name="SizeLabel" Foreground="White" Background="#CC111111" Padding="5,2" FontSize="12"/>
+    </Canvas>
+    <Canvas x:Name="InputCanvas" Background="Transparent"
+            MouseLeftButtonDown="Input_MouseLeftButtonDown"
+            MouseMove="Input_MouseMove" MouseLeftButtonUp="Input_MouseLeftButtonUp"/>
+    <Border x:Name="Toolbar" Background="Transparent" Visibility="Collapsed">
+      <Border.Resources>
+        <Style x:Key="ToolbarToolButton" TargetType="ToggleButton">
+          <Setter Property="Width" Value="34"/><Setter Property="Height" Value="32"/>
+          <Setter Property="Margin" Value="0"/><Setter Property="Padding" Value="0"/>
+          <Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="#FF252525"/>
+          <Setter Property="BorderThickness" Value="0"/><Setter Property="Cursor" Value="Hand"/>
+          <Setter Property="FontFamily" Value="Segoe UI Symbol"/><Setter Property="FontSize" Value="17"/>
+          <Setter Property="Template"><Setter.Value>
+            <ControlTemplate TargetType="ToggleButton">
+              <Border x:Name="ButtonChrome" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}">
+                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              </Border>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ButtonChrome" Property="Background" Value="#FFE6F3FC"/></Trigger>
+                <Trigger Property="IsChecked" Value="True"><Setter TargetName="ButtonChrome" Property="Background" Value="#FF168CE5"/><Setter Property="Foreground" Value="White"/></Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </Setter.Value></Setter>
+        </Style>
+        <Style x:Key="ToolbarActionButton" TargetType="Button">
+          <Setter Property="Width" Value="34"/><Setter Property="Height" Value="32"/>
+          <Setter Property="Margin" Value="0"/><Setter Property="Padding" Value="0"/>
+          <Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="#FF252525"/>
+          <Setter Property="BorderThickness" Value="0"/><Setter Property="Cursor" Value="Hand"/>
+          <Setter Property="FontFamily" Value="Segoe MDL2 Assets"/><Setter Property="FontSize" Value="15"/>
+          <Setter Property="Template"><Setter.Value>
+            <ControlTemplate TargetType="Button">
+              <Border x:Name="ButtonChrome" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}">
+                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              </Border>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ButtonChrome" Property="Background" Value="#FFE6F3FC"/></Trigger>
+                <Trigger Property="IsPressed" Value="True"><Setter TargetName="ButtonChrome" Property="Background" Value="#FFCBE8FA"/></Trigger>
+                <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.35"/></Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </Setter.Value></Setter>
+        </Style>
+        <Style x:Key="OptionToggle" TargetType="ToggleButton" BasedOn="{StaticResource ToolbarToolButton}">
+          <Setter Property="Width" Value="32"/><Setter Property="Height" Value="28"/><Setter Property="FontSize" Value="14"/>
+        </Style>
+        <Style x:Key="PaletteButton" TargetType="Button">
+          <Setter Property="Width" Value="16"/><Setter Property="Height" Value="16"/><Setter Property="Margin" Value="1"/>
+          <Setter Property="Padding" Value="0"/><Setter Property="BorderBrush" Value="#FF777777"/><Setter Property="BorderThickness" Value="1"/>
+          <Setter Property="Cursor" Value="Hand"/>
+        </Style>
+      </Border.Resources>
+      <StackPanel>
+        <Border Background="#FFF9F9F9" BorderBrush="#FFBDBDBD" BorderThickness="1" Padding="2,0">
+          <StackPanel Orientation="Horizontal">
+            <ToggleButton x:Name="ShapeToolButton" Style="{StaticResource ToolbarToolButton}" Tag="Rectangle" ToolTip="矩形／圓形／橢圓 (Ctrl+1)" Click="Tool_Click">
+              <Grid Width="22" Height="20">
+                <Rectangle Width="14" Height="10" HorizontalAlignment="Left" VerticalAlignment="Bottom" Fill="Transparent" StrokeThickness="1.5"
+                           Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type ToggleButton}}}"/>
+                <Ellipse Width="11" Height="11" HorizontalAlignment="Right" VerticalAlignment="Top" Fill="Transparent" StrokeThickness="1.5"
+                         Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type ToggleButton}}}"/>
+              </Grid>
+            </ToggleButton>
+            <ToggleButton x:Name="LineToolButton" Style="{StaticResource ToolbarToolButton}" Tag="Arrow" ToolTip="直線／箭頭" Click="Tool_Click">
+              <Grid Width="22" Height="20">
+                <Path Data="M 3,16 L 18,3 M 12,4 L 18,3 L 17,9" Fill="Transparent" StrokeThickness="1.6" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                      Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type ToggleButton}}}"/>
+                <Ellipse Width="4" Height="4" Fill="#FFFF2D2D" HorizontalAlignment="Right" VerticalAlignment="Top"/>
+              </Grid>
+            </ToggleButton>
+            <ToggleButton x:Name="PenToolButton" Style="{StaticResource ToolbarToolButton}" Tag="Pen" ToolTip="畫筆" Click="Tool_Click">
+              <Grid Width="21" Height="21">
+                <Path Data="M 3,18 L 5,12 L 15,2 L 19,6 L 9,16 Z M 5,12 L 9,16" Fill="Transparent" StrokeThickness="1.5" StrokeLineJoin="Round"
+                      Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type ToggleButton}}}"/>
+              </Grid>
+            </ToggleButton>
+            <ToggleButton x:Name="HighlighterToolButton" Style="{StaticResource ToolbarToolButton}" Tag="Highlighter" ToolTip="螢光筆：直線／矩形" Click="Tool_Click">
+              <Grid Width="21" Height="21">
+                <Path Data="M 4,15 L 13,3 L 18,7 L 9,19 Z" StrokeThickness="1.4" StrokeLineJoin="Round"
+                      Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type ToggleButton}}}"
+                      Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type ToggleButton}}}"/>
+                <Path Data="M 3,19 L 10,19" Stroke="#FFFF9A2E" StrokeThickness="2"/>
+              </Grid>
+            </ToggleButton>
+            <ToggleButton x:Name="FilterToolButton" Style="{StaticResource ToolbarToolButton}" Tag="Mosaic" Content="▦" ToolTip="馬賽克 / 模糊" Click="Tool_Click"/>
+            <ToggleButton x:Name="TextToolButton" Style="{StaticResource ToolbarToolButton}" Tag="Text" Content="T" FontFamily="Segoe UI" FontSize="18" ToolTip="文字" Click="Tool_Click"/>
+            <ToggleButton x:Name="EraserToolButton" Style="{StaticResource ToolbarToolButton}" Tag="Eraser" Content="◇" ToolTip="橡皮擦 (E)" Click="Tool_Click"/>
+            <Border Width="1" Height="20" Background="#FFD0D0D0" Margin="3,0"/>
+            <Button x:Name="UndoButton" Style="{StaticResource ToolbarActionButton}" Content="&#xE7A7;" ToolTip="復原 (Ctrl+Z)" Click="Undo_Click"/>
+            <Button x:Name="RedoButton" Style="{StaticResource ToolbarActionButton}" Content="&#xE7A6;" ToolTip="重做 (Ctrl+Y)" Click="Redo_Click"/>
+            <Border Width="1" Height="20" Background="#FFD0D0D0" Margin="3,0"/>
+            <Button Style="{StaticResource ToolbarActionButton}" Content="&#xE711;" ToolTip="取消 (Esc)" Click="Cancel_Click"/>
+            <Button Style="{StaticResource ToolbarActionButton}" Content="&#xE718;" ToolTip="貼到螢幕 (Ctrl+T)" Click="Sticker_Click"/>
+            <Button Style="{StaticResource ToolbarActionButton}" Content="&#xE74E;" ToolTip="儲存至檔案 (Ctrl+S)" Click="Save_Click"/>
+            <Button Style="{StaticResource ToolbarActionButton}" Content="&#xE8C8;" ToolTip="複製並完成 (Ctrl+C / Enter)" Click="Copy_Click"/>
+          </StackPanel>
+        </Border>
+        <Border x:Name="ContextToolbar" Background="#FFF9F9F9" BorderBrush="#FFBDBDBD" BorderThickness="1,0,1,1" Padding="4,2" HorizontalAlignment="Left">
+          <WrapPanel VerticalAlignment="Center">
+            <StackPanel x:Name="ShapeOptions" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed">
+              <ToggleButton x:Name="OutlineShapeOption" Style="{StaticResource OptionToggle}" ToolTip="空心" Click="ShapeFill_Click">
+                <Rectangle Width="16" Height="12" Fill="Transparent" StrokeThickness="1.5"
+                           Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type ToggleButton}}}"/>
+              </ToggleButton>
+              <ToggleButton x:Name="FilledShapeOption" Style="{StaticResource OptionToggle}" ToolTip="實心" Click="ShapeFill_Click">
+                <Rectangle Width="16" Height="12" StrokeThickness="1"
+                           Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type ToggleButton}}}"
+                           Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type ToggleButton}}}"/>
+              </ToggleButton>
+              <Border Width="1" Height="18" Background="#FFD0D0D0" Margin="3,0"/>
+              <ToggleButton x:Name="RectangleOption" Style="{StaticResource OptionToggle}" Tag="Rectangle" ToolTip="矩形" Click="ShapeGeometry_Click">
+                <Rectangle Width="17" Height="12" Fill="Transparent" StrokeThickness="1.5"
+                           Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type ToggleButton}}}"/>
+              </ToggleButton>
+              <ToggleButton x:Name="EllipseOption" Style="{StaticResource OptionToggle}" Tag="Ellipse" ToolTip="圓形／橢圓" Click="ShapeGeometry_Click">
+                <Ellipse Width="17" Height="13" Fill="Transparent" StrokeThickness="1.5"
+                         Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type ToggleButton}}}"/>
+              </ToggleButton>
+            </StackPanel>
+            <StackPanel x:Name="LineOptions" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed">
+              <ToggleButton x:Name="LineOption" Style="{StaticResource OptionToggle}" Tag="Line" ToolTip="直線" Click="Tool_Click">
+                <Path Data="M 4,14 L 28,14" StrokeThickness="1.5" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type ToggleButton}}}"/>
+              </ToggleButton>
+              <ToggleButton x:Name="ArrowOption" Style="{StaticResource OptionToggle}" Tag="Arrow" ToolTip="開放箭頭" Click="Tool_Click">
+                <Path Data="M 4,14 L 27,14 M 20,8 L 27,14 L 20,20" Fill="Transparent" StrokeThickness="1.5" StrokeLineJoin="Round"
+                      Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type ToggleButton}}}"/>
+              </ToggleButton>
+              <ToggleButton x:Name="OutlineArrowOption" Style="{StaticResource OptionToggle}" Tag="OutlineArrow" ToolTip="空心箭頭" Click="Tool_Click">
+                <Path Data="M 3,14 L 18,14 L 18,9 L 28,14 L 18,19 L 18,14" Fill="Transparent" StrokeThickness="1.3" StrokeLineJoin="Round"
+                      Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type ToggleButton}}}"/>
+              </ToggleButton>
+              <ToggleButton x:Name="FilledArrowOption" Style="{StaticResource OptionToggle}" Tag="FilledArrow" ToolTip="實心箭頭" Click="Tool_Click">
+                <Path Data="M 3,11 L 18,11 L 18,7 L 28,14 L 18,21 L 18,17 L 3,17 Z"
+                      Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type ToggleButton}}}"/>
+              </ToggleButton>
+            </StackPanel>
+            <StackPanel x:Name="HighlighterOptions" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed">
+              <ToggleButton x:Name="HighlighterLineOption" Style="{StaticResource OptionToggle}" Tag="Highlighter" ToolTip="直線螢光筆" Click="Tool_Click">
+                <Line X1="5" Y1="14" X2="27" Y2="14" StrokeThickness="7" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Opacity="0.55"
+                      Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type ToggleButton}}}"/>
+              </ToggleButton>
+              <ToggleButton x:Name="HighlighterRectangleOption" Style="{StaticResource OptionToggle}" Tag="HighlighterRectangle" ToolTip="矩形螢光筆" Click="Tool_Click">
+                <Rectangle Width="20" Height="13" Opacity="0.55"
+                           Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type ToggleButton}}}"/>
+              </ToggleButton>
+            </StackPanel>
+            <StackPanel x:Name="FilterOptions" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed">
+              <ToggleButton x:Name="MosaicOption" Style="{StaticResource OptionToggle}" Tag="Mosaic" Content="▦" ToolTip="馬賽克" Click="Tool_Click"/>
+              <ToggleButton x:Name="BlurOption" Style="{StaticResource OptionToggle}" Tag="Blur" Content="▧" ToolTip="模糊" Click="Tool_Click"/>
+              <TextBlock Text="強度" VerticalAlignment="Center" Margin="7,0,3,0"/>
+              <Slider x:Name="FilterStrengthSlider" Width="78" Minimum="4" Maximum="28" TickFrequency="2" ValueChanged="Style_Changed"/>
+              <TextBlock x:Name="FilterStrengthValue" Width="26" VerticalAlignment="Center" TextAlignment="Center"/>
+            </StackPanel>
+            <StackPanel x:Name="TextOptions" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed">
+              <ToggleButton x:Name="BoldToggle" Style="{StaticResource OptionToggle}" Content="B" FontWeight="Bold" ToolTip="粗體" Click="TextStyle_Click"/>
+              <ToggleButton x:Name="ItalicToggle" Style="{StaticResource OptionToggle}" Content="I" FontStyle="Italic" ToolTip="斜體" Click="TextStyle_Click"/>
+              <ComboBox x:Name="FontFamilyPicker" Width="142" Height="25" Margin="3,0" SelectionChanged="Style_Changed" DropDownOpened="FontFamilyPicker_DropDownOpened"/>
+              <ComboBox x:Name="FontSizePicker" Width="52" Height="25" Margin="1,0,4,0" SelectionChanged="Style_Changed">
+                <ComboBoxItem Content="14"/><ComboBoxItem Content="18"/><ComboBoxItem Content="22"/><ComboBoxItem Content="28"/><ComboBoxItem Content="36"/><ComboBoxItem Content="48"/><ComboBoxItem Content="64"/>
+              </ComboBox>
+            </StackPanel>
+            <StackPanel x:Name="StrokeOptions" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed">
+              <TextBlock Text="粗細" VerticalAlignment="Center" Margin="6,0,2,0"/>
+              <Slider x:Name="WidthSlider" Width="72" Minimum="1" Maximum="32" TickFrequency="1" ValueChanged="Style_Changed"/>
+              <TextBlock x:Name="WidthValue" Width="25" VerticalAlignment="Center" TextAlignment="Center"/>
+            </StackPanel>
+            <StackPanel x:Name="ColorOptions" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed">
+              <Border x:Name="CurrentColorPreview" Width="23" Height="23" BorderBrush="#FF333333" BorderThickness="1" Margin="4,0,2,0"/>
+              <WrapPanel x:Name="ColorPalette" Width="162">
+                <Button Style="{StaticResource PaletteButton}" Tag="#FFFF3B30" Background="#FFFF3B30" Click="ColorSwatch_Click"/>
+                <Button Style="{StaticResource PaletteButton}" Tag="#FFFF9500" Background="#FFFF9500" Click="ColorSwatch_Click"/>
+                <Button Style="{StaticResource PaletteButton}" Tag="#FFFFCC00" Background="#FFFFCC00" Click="ColorSwatch_Click"/>
+                <Button Style="{StaticResource PaletteButton}" Tag="#FF34C759" Background="#FF34C759" Click="ColorSwatch_Click"/>
+                <Button Style="{StaticResource PaletteButton}" Tag="#FF00C7BE" Background="#FF00C7BE" Click="ColorSwatch_Click"/>
+                <Button Style="{StaticResource PaletteButton}" Tag="#FF007AFF" Background="#FF007AFF" Click="ColorSwatch_Click"/>
+                <Button Style="{StaticResource PaletteButton}" Tag="#FF5856D6" Background="#FF5856D6" Click="ColorSwatch_Click"/>
+                <Button Style="{StaticResource PaletteButton}" Tag="#FFAF52DE" Background="#FFAF52DE" Click="ColorSwatch_Click"/>
+                <Button Style="{StaticResource PaletteButton}" Tag="#FFFFFFFF" Background="#FFFFFFFF" Click="ColorSwatch_Click"/>
+                <Button Style="{StaticResource PaletteButton}" Tag="#FFB0B0B0" Background="#FFB0B0B0" Click="ColorSwatch_Click"/>
+                <Button Style="{StaticResource PaletteButton}" Tag="#FF636366" Background="#FF636366" Click="ColorSwatch_Click"/>
+                <Button Style="{StaticResource PaletteButton}" Tag="#FF111111" Background="#FF111111" Click="ColorSwatch_Click"/>
+                <Button Style="{StaticResource PaletteButton}" Tag="#FFFFD1C7" Background="#FFFFD1C7" Click="ColorSwatch_Click"/>
+                <Button Style="{StaticResource PaletteButton}" Tag="#FFFFE5A0" Background="#FFFFE5A0" Click="ColorSwatch_Click"/>
+                <Button Style="{StaticResource PaletteButton}" Tag="#FFB7F0C0" Background="#FFB7F0C0" Click="ColorSwatch_Click"/>
+                <Button Style="{StaticResource PaletteButton}" Tag="#FFB9D9FF" Background="#FFB9D9FF" Click="ColorSwatch_Click"/>
+              </WrapPanel>
+              <Button Width="25" Height="23" Margin="2,0" Padding="0" Content="…" ToolTip="更多色彩" Click="MoreColors_Click"/>
+            </StackPanel>
+            <StackPanel x:Name="OpacityOptions" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed">
+              <TextBlock Text="透明" VerticalAlignment="Center" Margin="5,0,2,0"/>
+              <Slider x:Name="OpacitySlider" Width="65" Minimum="0.1" Maximum="1" TickFrequency="0.1" ValueChanged="Style_Changed"/>
+              <TextBlock x:Name="OpacityValue" Width="38" VerticalAlignment="Center" TextAlignment="Right"/>
+            </StackPanel>
+          </WrapPanel>
+        </Border>
+      </StackPanel>
+    </Border>
+    <TextBlock x:Name="HelpText" Canvas.Left="18" Canvas.Top="16" Foreground="White" Background="#B0000000" Padding="8,5"
+               Text="移動游標預覽區塊 · 點擊接受 · 拖曳自訂 · W 選視窗 · F 選螢幕 · Shift 顯示 HEX"/>
+    <Border x:Name="Magnifier" Width="154" Height="184" Background="#EB151515" BorderBrush="#FF777777"
+            BorderThickness="1" Padding="8" Visibility="Collapsed" IsHitTestVisible="False">
+      <StackPanel>
+        <Grid Width="120" Height="120" HorizontalAlignment="Center">
+          <Image x:Name="MagnifierPixels" Width="120" Height="120" Stretch="Fill"
+                 RenderOptions.BitmapScalingMode="NearestNeighbor" SnapsToDevicePixels="True"/>
+          <Canvas Width="120" Height="120" IsHitTestVisible="False">
+            <Line X1="0" Y1="60" X2="120" Y2="60" Stroke="#99000000" StrokeThickness="1"/>
+            <Line X1="60" Y1="0" X2="60" Y2="120" Stroke="#99000000" StrokeThickness="1"/>
+            <Rectangle Canvas.Left="56" Canvas.Top="56" Width="8" Height="8"
+                       Fill="Transparent" Stroke="White" StrokeThickness="2"/>
+            <Rectangle Canvas.Left="55" Canvas.Top="55" Width="10" Height="10"
+                       Fill="Transparent" Stroke="Black" StrokeThickness="1"/>
+          </Canvas>
+        </Grid>
+        <TextBlock x:Name="MagnifierCoordinate" Foreground="White" HorizontalAlignment="Center" Margin="0,4,0,0"/>
+        <TextBlock x:Name="MagnifierColor" Foreground="White" HorizontalAlignment="Center" FontWeight="SemiBold"/>
+        <TextBlock Text="按住 Shift 顯示 HEX" Foreground="#FFD0D0D0" HorizontalAlignment="Center" FontSize="11"/>
+      </StackPanel>
+    </Border>
+  </Canvas>
+</Window>
