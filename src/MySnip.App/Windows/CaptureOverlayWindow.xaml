@@ -3,8 +3,9 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         WindowStyle="None" ResizeMode="NoResize" ShowInTaskbar="False" Topmost="True"
         Background="Black" Cursor="Cross" KeyDown="Window_KeyDown" KeyUp="Window_KeyUp">
-  <Canvas x:Name="Root">
+  <Canvas x:Name="Root" ClipToBounds="True">
     <Image x:Name="Screenshot" Canvas.Left="0" Canvas.Top="0" Stretch="None"/>
+    <Image x:Name="ReplayedScreenshot" Stretch="None" Visibility="Collapsed"/>
     <Canvas x:Name="AnnotationCanvas" Background="Transparent" IsHitTestVisible="False"/>
     <Canvas x:Name="MaskCanvas" IsHitTestVisible="False">
       <Rectangle x:Name="MaskTop" Fill="#99000000"/><Rectangle x:Name="MaskLeft" Fill="#99000000"/>
@@ -14,7 +15,8 @@
     </Canvas>
     <Canvas x:Name="InputCanvas" Background="Transparent"
             MouseLeftButtonDown="Input_MouseLeftButtonDown"
-            MouseMove="Input_MouseMove" MouseLeftButtonUp="Input_MouseLeftButtonUp"/>
+            MouseMove="Input_MouseMove" MouseLeftButtonUp="Input_MouseLeftButtonUp" MouseDown="Input_MouseDown"
+            MouseWheel="Input_MouseWheel"/>
     <Border x:Name="Toolbar" Background="Transparent" Visibility="Collapsed">
       <Border.Resources>
         <Style x:Key="ToolbarToolButton" TargetType="ToggleButton">
@@ -98,12 +100,13 @@
             <ToggleButton x:Name="FilterToolButton" Style="{StaticResource ToolbarToolButton}" Tag="Mosaic" Content="▦" ToolTip="馬賽克 / 模糊" Click="Tool_Click"/>
             <ToggleButton x:Name="TextToolButton" Style="{StaticResource ToolbarToolButton}" Tag="Text" Content="T" FontFamily="Segoe UI" FontSize="18" ToolTip="文字" Click="Tool_Click"/>
             <ToggleButton x:Name="EraserToolButton" Style="{StaticResource ToolbarToolButton}" Tag="Eraser" Content="◇" ToolTip="橡皮擦 (E)" Click="Tool_Click"/>
+            <Button Style="{StaticResource ToolbarActionButton}" FontFamily="Segoe UI" Content="⋯" ToolTip="截圖選項" Click="Options_Click"/>
             <Border Width="1" Height="20" Background="#FFD0D0D0" Margin="3,0"/>
             <Button x:Name="UndoButton" Style="{StaticResource ToolbarActionButton}" Content="&#xE7A7;" ToolTip="復原 (Ctrl+Z)" Click="Undo_Click"/>
             <Button x:Name="RedoButton" Style="{StaticResource ToolbarActionButton}" Content="&#xE7A6;" ToolTip="重做 (Ctrl+Y)" Click="Redo_Click"/>
             <Border Width="1" Height="20" Background="#FFD0D0D0" Margin="3,0"/>
             <Button Style="{StaticResource ToolbarActionButton}" Content="&#xE711;" ToolTip="取消 (Esc)" Click="Cancel_Click"/>
-            <Button Style="{StaticResource ToolbarActionButton}" Content="&#xE718;" ToolTip="貼到螢幕 (Ctrl+T)" Click="Sticker_Click"/>
+            <Button x:Name="PinButton" Style="{StaticResource ToolbarActionButton}" Content="&#xE718;" ToolTip="貼到螢幕 (Ctrl+T)" Click="Sticker_Click"/>
             <Button Style="{StaticResource ToolbarActionButton}" Content="&#xE74E;" ToolTip="儲存至檔案 (Ctrl+S)" Click="Save_Click"/>
             <Button Style="{StaticResource ToolbarActionButton}" Content="&#xE8C8;" ToolTip="複製並完成 (Ctrl+C / Enter)" Click="Copy_Click"/>
           </StackPanel>
@@ -129,6 +132,7 @@
                 <Ellipse Width="17" Height="13" Fill="Transparent" StrokeThickness="1.5"
                          Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type ToggleButton}}}"/>
               </ToggleButton>
+              <ToggleButton x:Name="RoundedOption" Style="{StaticResource OptionToggle}" Tag="RoundedRectangle" Content="▢" ToolTip="圓角矩形" Click="Tool_Click"/>
             </StackPanel>
             <StackPanel x:Name="LineOptions" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed">
               <ToggleButton x:Name="LineOption" Style="{StaticResource OptionToggle}" Tag="Line" ToolTip="直線" Click="Tool_Click">
@@ -146,6 +150,8 @@
                 <Path Data="M 3,11 L 18,11 L 18,7 L 28,14 L 18,21 L 18,17 L 3,17 Z"
                       Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type ToggleButton}}}"/>
               </ToggleButton>
+              <ToggleButton x:Name="DoubleArrowOption" Style="{StaticResource OptionToggle}" Tag="DoubleArrow" Content="↔" ToolTip="雙向箭頭" Click="Tool_Click"/>
+              <ToggleButton x:Name="LineStripOption" Style="{StaticResource OptionToggle}" Tag="LineStrip" Content="⌁" ToolTip="折線（逐點點擊，雙擊或右鍵完成）" Click="Tool_Click"/>
             </StackPanel>
             <StackPanel x:Name="HighlighterOptions" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed">
               <ToggleButton x:Name="HighlighterLineOption" Style="{StaticResource OptionToggle}" Tag="Highlighter" ToolTip="直線螢光筆" Click="Tool_Click">
@@ -156,10 +162,14 @@
                 <Rectangle Width="20" Height="13" Opacity="0.55"
                            Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type ToggleButton}}}"/>
               </ToggleButton>
+              <ToggleButton x:Name="HighlighterEllipseOption" Style="{StaticResource OptionToggle}" Tag="HighlighterEllipse"
+                            ToolTip="橢圓螢光筆" Content="◉" Click="Tool_Click"/>
             </StackPanel>
             <StackPanel x:Name="FilterOptions" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed">
               <ToggleButton x:Name="MosaicOption" Style="{StaticResource OptionToggle}" Tag="Mosaic" Content="▦" ToolTip="馬賽克" Click="Tool_Click"/>
               <ToggleButton x:Name="BlurOption" Style="{StaticResource OptionToggle}" Tag="Blur" Content="▧" ToolTip="模糊" Click="Tool_Click"/>
+              <ToggleButton x:Name="MagnifyOption" Style="{StaticResource OptionToggle}" Tag="Magnify" Content="⊕" ToolTip="放大標註" Click="Tool_Click"/>
+              <CheckBox x:Name="EllipseFilter" Content="橢圓" VerticalAlignment="Center" Margin="4,0"/>
               <TextBlock Text="強度" VerticalAlignment="Center" Margin="7,0,3,0"/>
               <Slider x:Name="FilterStrengthSlider" Width="78" Minimum="4" Maximum="28" TickFrequency="2" ValueChanged="Style_Changed"/>
               <TextBlock x:Name="FilterStrengthValue" Width="26" VerticalAlignment="Center" TextAlignment="Center"/>
@@ -167,15 +177,19 @@
             <StackPanel x:Name="TextOptions" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed">
               <ToggleButton x:Name="BoldToggle" Style="{StaticResource OptionToggle}" Content="B" FontWeight="Bold" ToolTip="粗體" Click="TextStyle_Click"/>
               <ToggleButton x:Name="ItalicToggle" Style="{StaticResource OptionToggle}" Content="I" FontStyle="Italic" ToolTip="斜體" Click="TextStyle_Click"/>
+              <CheckBox x:Name="TextBackground" Content="底色" VerticalAlignment="Center" Margin="4,0"/>
+              <Button Content="描邊…" ToolTip="文字描邊顏色與粗細" Click="TextOutline_Click" Padding="4,1"/>
               <ComboBox x:Name="FontFamilyPicker" Width="142" Height="25" Margin="3,0" SelectionChanged="Style_Changed" DropDownOpened="FontFamilyPicker_DropDownOpened"/>
               <ComboBox x:Name="FontSizePicker" Width="52" Height="25" Margin="1,0,4,0" SelectionChanged="Style_Changed">
                 <ComboBoxItem Content="14"/><ComboBoxItem Content="18"/><ComboBoxItem Content="22"/><ComboBoxItem Content="28"/><ComboBoxItem Content="36"/><ComboBoxItem Content="48"/><ComboBoxItem Content="64"/>
               </ComboBox>
             </StackPanel>
             <StackPanel x:Name="StrokeOptions" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed">
+              <StackPanel x:Name="PenPresets" Orientation="Horizontal"/>
               <TextBlock Text="粗細" VerticalAlignment="Center" Margin="6,0,2,0"/>
               <Slider x:Name="WidthSlider" Width="72" Minimum="1" Maximum="32" TickFrequency="1" ValueChanged="Style_Changed"/>
               <TextBlock x:Name="WidthValue" Width="25" VerticalAlignment="Center" TextAlignment="Center"/>
+              <CheckBox x:Name="DashedStroke" Content="虛線" VerticalAlignment="Center" Margin="4,0"/>
             </StackPanel>
             <StackPanel x:Name="ColorOptions" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed">
               <Border x:Name="CurrentColorPreview" Width="23" Height="23" BorderBrush="#FF333333" BorderThickness="1" Margin="4,0,2,0"/>
@@ -209,14 +223,15 @@
       </StackPanel>
     </Border>
     <TextBlock x:Name="HelpText" Canvas.Left="18" Canvas.Top="16" Foreground="White" Background="#B0000000" Padding="8,5"
-               Text="移動游標預覽區塊 · 點擊接受 · 拖曳自訂 · W 選視窗 · F 選螢幕 · Shift 顯示 HEX"/>
+               IsHitTestVisible="False" Text="拖曳框選　F 選目前螢幕　Shift+F 選全部　右鍵開啟選項"/>
     <Border x:Name="Magnifier" Width="154" Height="184" Background="#EB151515" BorderBrush="#FF777777"
             BorderThickness="1" Padding="8" Visibility="Collapsed" IsHitTestVisible="False">
       <StackPanel>
-        <Grid Width="120" Height="120" HorizontalAlignment="Center">
+        <Viewbox x:Name="MagnifierViewport" Width="120" Height="120" HorizontalAlignment="Center">
+        <Grid Width="120" Height="120">
           <Image x:Name="MagnifierPixels" Width="120" Height="120" Stretch="Fill"
                  RenderOptions.BitmapScalingMode="NearestNeighbor" SnapsToDevicePixels="True"/>
-          <Canvas Width="120" Height="120" IsHitTestVisible="False">
+          <Canvas x:Name="MagnifierCrosshair" Width="120" Height="120" IsHitTestVisible="False">
             <Line X1="0" Y1="60" X2="120" Y2="60" Stroke="#99000000" StrokeThickness="1"/>
             <Line X1="60" Y1="0" X2="60" Y2="120" Stroke="#99000000" StrokeThickness="1"/>
             <Rectangle Canvas.Left="56" Canvas.Top="56" Width="8" Height="8"
@@ -225,6 +240,7 @@
                        Fill="Transparent" Stroke="Black" StrokeThickness="1"/>
           </Canvas>
         </Grid>
+        </Viewbox>
         <TextBlock x:Name="MagnifierCoordinate" Foreground="White" HorizontalAlignment="Center" Margin="0,4,0,0"/>
         <TextBlock x:Name="MagnifierColor" Foreground="White" HorizontalAlignment="Center" FontWeight="SemiBold"/>
         <TextBlock Text="按住 Shift 顯示 HEX" Foreground="#FFD0D0D0" HorizontalAlignment="Center" FontSize="11"/>

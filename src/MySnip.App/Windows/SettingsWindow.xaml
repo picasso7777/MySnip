@@ -1,7 +1,7 @@
 <Window x:Class="MySnip.App.Windows.SettingsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MySnip 設定" Width="450" Height="450" ResizeMode="NoResize"
+        Title="MySnip 設定" Width="495" SizeToContent="Height" ResizeMode="NoResize"
         WindowStartupLocation="CenterScreen" ShowInTaskbar="False">
   <Grid Margin="20">
     <Grid.RowDefinitions>
@@ -10,11 +10,16 @@
     </Grid.RowDefinitions>
     <TextBlock Grid.Row="0" Text="全域快捷鍵" FontSize="17" FontWeight="SemiBold" Margin="0,0,0,10"/>
     <Grid Grid.Row="1" Margin="0,3"><Grid.ColumnDefinitions><ColumnDefinition Width="130"/><ColumnDefinition/></Grid.ColumnDefinitions>
-      <TextBlock VerticalAlignment="Center" Text="開始截圖"/><ComboBox x:Name="CaptureKey" Grid.Column="1"/>
+      <TextBlock VerticalAlignment="Center" Text="開始截圖"/><ComboBox x:Name="CaptureKey" Grid.Column="1" IsEditable="True"/>
     </Grid>
-    <Grid Grid.Row="2" Margin="0,3"><Grid.ColumnDefinitions><ColumnDefinition Width="130"/><ColumnDefinition/></Grid.ColumnDefinitions>
-      <TextBlock VerticalAlignment="Center" Text="從剪貼簿貼圖"/><ComboBox x:Name="PasteKey" Grid.Column="1"/>
-    </Grid>
+    <StackPanel Grid.Row="2">
+      <Grid Margin="0,3"><Grid.ColumnDefinitions><ColumnDefinition Width="130"/><ColumnDefinition/></Grid.ColumnDefinitions>
+        <TextBlock VerticalAlignment="Center" Text="從剪貼簿貼圖"/><ComboBox x:Name="PasteKey" Grid.Column="1" IsEditable="True"/>
+      </Grid>
+      <Grid Margin="0,3"><Grid.ColumnDefinitions><ColumnDefinition Width="130"/><ColumnDefinition/></Grid.ColumnDefinitions>
+        <TextBlock VerticalAlignment="Center" Text="顯示／隱藏貼圖"/><TextBox x:Name="VisibilityKey" Grid.Column="1" AutomationProperties.Name="顯示或隱藏貼圖快捷鍵"/>
+      </Grid>
+    </StackPanel>
     <TextBlock Grid.Row="3" Text="預設輸出資料夾" FontWeight="SemiBold" Margin="0,18,0,4"/>
     <Grid Grid.Row="4"><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
       <TextBox x:Name="OutputDirectory" VerticalContentAlignment="Center"/><Button Grid.Column="1" Content="瀏覽…" Click="Browse_Click"/>
@@ -35,9 +40,27 @@
         <TextBlock Text="透明度" VerticalAlignment="Center" Margin="12,0,6,0"/>
         <Slider x:Name="ToolOpacity" Width="75" Minimum="0.1" Maximum="1" TickFrequency="0.1"/>
       </WrapPanel>
-      <CheckBox x:Name="StartWithWindows" Content="登入 Windows 時自動啟動 MySnip" Margin="0,18,0,0"/>
+      <TextBlock Text="截圖與貼圖" FontWeight="SemiBold" Margin="0,15,0,5"/>
+      <WrapPanel Margin="0,0,0,6">
+        <TextBlock Text="延遲秒數" VerticalAlignment="Center" Margin="0,0,6,0"/>
+        <TextBox x:Name="CaptureDelay" Width="52" VerticalContentAlignment="Center" AutomationProperties.Name="延遲秒數"/>
+        <TextBlock Text="保留歷史筆數" VerticalAlignment="Center" Margin="16,0,6,0"/>
+        <TextBox x:Name="HistoryLimit" Width="52" VerticalContentAlignment="Center" AutomationProperties.Name="保留歷史筆數"/>
+      </WrapPanel>
+      <CheckBox x:Name="IncludeCursor" Content="截圖包含滑鼠游標" Margin="0,3"/>
+      <CheckBox x:Name="AutoSave" Content="成功截圖後自動儲存 PNG" Margin="0,3"/>
+      <CheckBox x:Name="RestoreStickers" Content="備份貼圖與群組並在啟動時還原" Margin="0,3"/>
+      <TextBlock Text="螢幕熱角" FontWeight="SemiBold" Margin="0,10,0,5"/>
+      <UniformGrid Columns="2" Margin="0,0,0,8">
+        <StackPanel Orientation="Horizontal" Margin="0,2"><TextBlock Text="左上" Width="38" VerticalAlignment="Center"/><ComboBox x:Name="CornerTopLeft" Width="142"/></StackPanel>
+        <StackPanel Orientation="Horizontal" Margin="0,2"><TextBlock Text="右上" Width="38" VerticalAlignment="Center"/><ComboBox x:Name="CornerTopRight" Width="142"/></StackPanel>
+        <StackPanel Orientation="Horizontal" Margin="0,2"><TextBlock Text="左下" Width="38" VerticalAlignment="Center"/><ComboBox x:Name="CornerBottomLeft" Width="142"/></StackPanel>
+        <StackPanel Orientation="Horizontal" Margin="0,2"><TextBlock Text="右下" Width="38" VerticalAlignment="Center"/><ComboBox x:Name="CornerBottomRight" Width="142"/></StackPanel>
+      </UniformGrid>
+      <CheckBox x:Name="StartWithWindows" Content="登入 Windows 時自動啟動 MySnip" Margin="0,3,0,10"/>
     </StackPanel>
     <StackPanel Grid.Row="6" Orientation="Horizontal" HorizontalAlignment="Right">
+      <Button Content="進階設定…" Click="Advanced_Click"/>
       <Button Content="取消" IsCancel="True"/><Button Content="儲存" IsDefault="True" Click="Save_Click"/>
     </StackPanel>
   </Grid>

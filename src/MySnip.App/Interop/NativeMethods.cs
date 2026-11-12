@@ -23,7 +23,11 @@ internal static partial class NativeMethods
     internal const uint MonitorDefaultToNearest = 2;
     internal const int WmDpiChanged = 0x02E0;
     internal const int WmDisplayChange = 0x007E;
+    internal const int WmGetMinMaxInfo = 0x0024;
     internal const uint SwpNoActivate = 0x0010;
+    internal const uint SwpShowWindow = 0x0040;
+    internal const uint SwpHideWindow = 0x0080;
+    internal const uint SwpNoSendChanging = 0x0400;
     internal static readonly nint HwndTopmost = new(-1);
     internal delegate bool EnumWindowsProc(nint hwnd, nint lParam);
 
@@ -41,6 +45,32 @@ internal static partial class NativeMethods
     [LibraryImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool GetCursorPos(out Point point);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool SetCursorPos(int x, int y);
+
+    [LibraryImport("user32.dll")]
+    internal static partial nint GetForegroundWindow();
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool GetCursorInfo(ref CursorInfo info);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool GetIconInfo(nint cursor, out IconInfo info);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool DrawIconEx(nint hdc, int x, int y, nint icon, int width, int height, uint step, nint brush, uint flags);
+
+    [LibraryImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool DeleteObject(nint handle);
+
+    [LibraryImport("dwmapi.dll")]
+    internal static partial int DwmFlush();
 
     [LibraryImport("user32.dll")]
     internal static partial nint WindowFromPoint(Point point);
@@ -100,4 +130,25 @@ internal static partial class NativeMethods
 
     [StructLayout(LayoutKind.Sequential)]
     internal struct Rect { public int Left; public int Top; public int Right; public int Bottom; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct MinMaxInfo
+    {
+        public Point Reserved, MaxSize, MaxPosition, MinTrackSize, MaxTrackSize;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct CursorInfo
+    {
+        public int Size, Flags;
+        public nint Handle;
+        public Point Position;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct IconInfo
+    {
+        public int IsIcon, HotspotX, HotspotY;
+        public nint Mask, Color;
+    }
 }

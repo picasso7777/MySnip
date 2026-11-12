@@ -1,64 +1,43 @@
-# MySnip - Python Edition
+# MySnip Python 版
 
-純 Python 的截圖與貼圖工具，等效於 C#/WPF 版的核心功能。
+適用於 Windows 10/11 x64。需有包含 Tkinter 的 Python 3.8 以上版本。
 
-## 需求
-
-- Python 3.10+
-- Windows 10/11
-
-## 安裝
+從儲存庫根目錄執行。啟動指令會檢查 Pillow 和 pywin32，缺少時會安裝。
 
 ```powershell
-cd python
-pip install -r requirements.txt
+.\python\Run-MySnip.ps1
 ```
 
-## 執行
+需要 MSS 擷取與 ZXing 條碼辨識時，可一併安裝擴充套件。
 
 ```powershell
-python mysnip.py
+.\python\Run-MySnip.ps1 -InstallExtras
 ```
 
-## 快捷鍵
+按 `F1` 開始截圖。可拖曳跨過不同螢幕，在游標所在螢幕按 `F` 選取該螢幕，或按 `Shift+F` 選取全部螢幕。按 `Enter` 複製，`Ctrl+T` 貼到桌面，`Ctrl+S` 另存。按 `F3` 從剪貼簿貼圖。更多操作與參數見 [兩版功能及命令列](../README.md)。
 
-| 按鍵 | 功能 |
-|------|------|
-| F1   | 截圖（拖曳選取區域） |
-| F3   | 將剪貼簿圖片貼到螢幕 |
-| Esc  | 取消截圖 / 關閉貼圖 |
-
-## 截圖操作
-
-1. 按 F1 後螢幕出現半透明覆蓋層
-2. 拖曳滑鼠選取區域
-3. 按 Enter → 貼圖到螢幕
-4. 右鍵 → 選擇「複製到剪貼簿」或「存檔」
-
-## 貼圖操作
-
-- 拖曳移動
-- 滾輪縮放
-- Ctrl+滾輪調整透明度
-- 右鍵選單：複製 / 另存 / 關閉
-- Esc 關閉
-
-## 系統匣
-
-右下角系統匣圖示可快速截圖、貼上、開啟截圖資料夾、結束程式。
-
-## 設定
-
-設定檔位於 `%LOCALAPPDATA%\MySnip\settings.json`，可修改：
-
-```json
-{
-  "capture_hotkey": "f1",
-  "paste_hotkey": "f3",
-  "output_directory": "C:\\Users\\你的名稱\\Pictures\\MySnip"
-}
+```powershell
+python .\python\mysnip.py snip --area -1280 50 1600 600 -o 'clipboard;pin'
+python .\python\mysnip.py show-group-manager
+python -m unittest discover -s python -v
 ```
 
-## 為什麼用 Python？
+## 建置 Windows 執行檔
 
-Python 版本不產生 .exe，防毒軟體不會誤判攔截。直接用 `python mysnip.py` 執行即可。
+使用已安裝 Pillow 與 pywin32 的 Windows x64 Python 執行下列指令。
+
+```powershell
+python -B .\python\build_portable.py
+```
+
+執行 `publish\python-single-file-win-x64\MySnip-Python.exe`。程式、Python runtime 和基本依賴都封在同一個檔案內。第一次啟動時會解壓縮到 `%LOCALAPPDATA%\MySnip\python-runtime`，之後重用該版本的快取。建置環境若有安裝 `mss` 或 `zxing-cpp`，打包時會一併帶入。單檔版也能呼叫 PATH 上已有解碼套件的 Python 讀取 QR Code／條碼。
+
+可在檔案總管雙擊 `MySnip-Python.exe`，啟動後到 Windows 系統匣找 MySnip。若終端機目前顯示 `>>>`，請先用 `exit()` 離開 Python 互動模式，再從 PowerShell 執行程式。
+
+| 資料 | 位置 |
+| --- | --- |
+| 設定 | `%LOCALAPPDATA%\MySnip\python-settings.json` |
+| 截圖歷史 | `%LOCALAPPDATA%\MySnip\python-captures` |
+| 貼圖與群組備份 | `%LOCALAPPDATA%\MySnip\python-stickers` |
+
+OCR 使用 Windows 已安裝的辨識語言。QR Code 和條碼可用 ZXing 或目前環境中具備解碼功能的 OpenCV。兩版預設的全域快捷鍵相同，同時啟動時可在設定中分別指定。

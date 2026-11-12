@@ -1,0 +1,63 @@
+<Window x:Class="MySnip.App.Windows.AdvancedSettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="MySnip 進階設定" Width="670" Height="475" MinWidth="570" MinHeight="420"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+  <DockPanel Margin="16">
+    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+      <Button Content="取消" IsCancel="True"/><Button Content="套用" IsDefault="True" Click="Apply_Click"/>
+    </StackPanel>
+    <TabControl>
+      <TabItem Header="截圖與貼圖">
+        <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Margin="12">
+          <CheckBox x:Name="SuperSnip" Content="啟用 Win＋滑鼠左鍵拖曳快速截圖" Margin="0,4"/>
+          <DockPanel Margin="0,4"><TextBlock Text="快速截圖完成後" Width="160" VerticalAlignment="Center"/><ComboBox x:Name="SuperOutput" Width="205" HorizontalAlignment="Left"/></DockPanel>
+          <CheckBox x:Name="RecordCanceled" Content="把取消的截圖保留在歷史" Margin="0,4"/>
+          <CheckBox x:Name="CopyFile" Content="複製圖片時同時提供 PNG 檔案" Margin="0,4"/>
+          <CheckBox x:Name="HideForSave" Content="另存時暫時隱藏截圖覆蓋層（Listary）" Margin="0,4"/>
+          <DockPanel Margin="0,4"><TextBlock Text="虛擬桌面" Width="160" VerticalAlignment="Center"/><ComboBox x:Name="Desktop" Width="205" HorizontalAlignment="Left"/></DockPanel>
+          <DockPanel Margin="0,4"><TextBlock Text="貼圖 Esc" Width="160" VerticalAlignment="Center"/><ComboBox x:Name="Escape" Width="205" HorizontalAlignment="Left"/></DockPanel>
+          <DockPanel Margin="0,4"><TextBlock Text="貼圖 Shift+Esc" Width="160" VerticalAlignment="Center"/><ComboBox x:Name="ShiftEscape" Width="205" HorizontalAlignment="Left"/></DockPanel>
+        </StackPanel></ScrollViewer>
+      </TabItem>
+      <TabItem Header="放大鏡與標註">
+        <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Margin="12">
+          <CheckBox x:Name="ShowMagnifier" Content="選取前自動顯示放大鏡" Margin="0,4"/>
+          <CheckBox x:Name="Crosshair" Content="顯示放大鏡十字線" Margin="0,4"/>
+          <DockPanel Margin="0,4"><TextBlock Text="放大鏡尺寸（72–320 px）" Width="160" VerticalAlignment="Center"/><TextBox x:Name="MagnifierSize" Width="205" HorizontalAlignment="Left"/></DockPanel>
+          <DockPanel Margin="0,4"><TextBlock Text="取樣半徑（2–25 px）" Width="160" VerticalAlignment="Center"/><TextBox x:Name="SampleRadius" Width="205" HorizontalAlignment="Left"/></DockPanel>
+          <DockPanel Margin="0,4"><TextBlock Text="放大鏡背景（#AARRGGBB）" Width="160" VerticalAlignment="Center"/><TextBox x:Name="MagnifierColor" Width="205" HorizontalAlignment="Left"/></DockPanel>
+          <CheckBox x:Name="RememberColors" Content="記住各標註工具的色彩" Margin="0,4"/>
+          <CheckBox x:Name="SelectNew" Content="自動選取新建標註" Margin="0,4"/>
+          <DockPanel Margin="0,4"><TextBlock Text="畫筆粗細（逗號分隔）" Width="160" VerticalAlignment="Center"/><TextBox x:Name="PenSizes" Width="205" HorizontalAlignment="Left"/></DockPanel>
+        </StackPanel></ScrollViewer>
+      </TabItem>
+      <TabItem Header="系統匣與外觀">
+        <StackPanel Margin="12">
+          <DockPanel Margin="0,4"><TextBlock Text="Windows 外觀" Width="160" VerticalAlignment="Center"/><ComboBox x:Name="Theme" Width="205" HorizontalAlignment="Left"/></DockPanel>
+          <DockPanel Margin="0,4"><TextBlock Text="左鍵點擊" Width="160" VerticalAlignment="Center"/><ComboBox x:Name="TrayLeft" Width="205" HorizontalAlignment="Left"/></DockPanel>
+          <DockPanel Margin="0,4"><TextBlock Text="中鍵點擊" Width="160" VerticalAlignment="Center"/><ComboBox x:Name="TrayMiddle" Width="205" HorizontalAlignment="Left"/></DockPanel>
+          <DockPanel Margin="0,4"><TextBlock Text="右鍵點擊" Width="160" VerticalAlignment="Center"/><ComboBox x:Name="TrayRight" Width="205" HorizontalAlignment="Left"/></DockPanel>
+        </StackPanel>
+      </TabItem>
+      <TabItem Header="自訂快捷鍵">
+        <DockPanel Margin="12">
+          <StackPanel DockPanel.Dock="Top">
+            <TextBlock Text="忽略快捷鍵的應用程式（執行檔名稱或路徑，以逗號分隔）"/>
+            <TextBox x:Name="IgnoreApplications" Margin="0,4,0,8"/>
+            <TextBlock Text="每列輸入快捷鍵、命令及個別排除的應用程式。選取列後可用 Delete 刪除。"
+                       TextWrapping="Wrap" Margin="0,0,0,7"/>
+          </StackPanel>
+          <DataGrid x:Name="Bindings" AutoGenerateColumns="False" CanUserAddRows="True" CanUserDeleteRows="True"
+                    SelectionUnit="FullRow">
+            <DataGrid.Columns>
+              <DataGridTextColumn Header="快捷鍵" Width="125" Binding="{Binding Shortcut}"/>
+              <DataGridTextColumn Header="命令（例如 snip --last -o clipboard）" Width="2*" Binding="{Binding Command}"/>
+              <DataGridTextColumn Header="個別排除應用程式" Width="*" Binding="{Binding Exclusions}"/>
+            </DataGrid.Columns>
+          </DataGrid>
+        </DockPanel>
+      </TabItem>
+    </TabControl>
+  </DockPanel>
+</Window>

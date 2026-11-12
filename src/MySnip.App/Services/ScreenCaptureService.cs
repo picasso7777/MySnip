@@ -12,25 +12,69 @@ namespace MySnip.App.Services;
 
 internal sealed class ScreenCaptureService : IScreenCaptureService
 {
-    public CapturedFrame CaptureVirtualDesktop()
+    public CapturedFrame CaptureVirtualDesktop() => CaptureVirtualDesktop(false);
+
+    public CapturedFrame CaptureVirtualDesktop(bool includeCursor) => CaptureDisplays(GetDisplayBounds(), null, includeCursor);
+
+    internal CapturedFrame CaptureRegion(PixelRect region, bool includeCursor) => CaptureDisplays(GetDisplayBounds(), region, includeCursor);
+
+    private static CapturedFrame CaptureDisplays(PixelRect[] displays, PixelRect? region, bool includeCursor)
     {
-        var bounds = VirtualBounds();
+        var desktop = DesktopGeometry.Enclose(displays);
+        var bounds = region?.ClampTo(desktop) ?? desktop;
+        if (bounds.IsEmpty) throw new InvalidOperationException("截圖範圍不在目前的螢幕配置中。");
         using var bitmap = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format32bppPArgb);
         using (var graphics = Graphics.FromImage(bitmap))
         {
-            graphics.CopyFromScreen(bounds.X, bounds.Y, 0, 0, new Size(bounds.Width, bounds.Height), CopyPixelOperation.SourceCopy);
+            graphics.Clear(Color.Black);
+            foreach (var display in displays.Distinct())
+            {
+                var area = display.ClampTo(bounds);
+                if (area.IsEmpty) continue;
+                graphics.CopyFromScreen(area.Left, area.Top, area.Left - bounds.Left, area.Top - bounds.Top,
+                    new Size(area.Width, area.Height), CopyPixelOperation.SourceCopy);
+            }
+            if (includeCursor) DrawCursor(graphics, bounds);
         }
 
         var data = bitmap.LockBits(new Rectangle(0, 0, bitmap.Width, bitmap.Height), ImageLockMode.ReadOnly, bitmap.PixelFormat);
         try
         {
-            var bytes = new byte[Math.Abs(data.Stride) * data.Height];
-            Marshal.Copy(data.Scan0, bytes, 0, bytes.Length);
-            return new CapturedFrame(bounds, data.Stride, bytes);
+            var stride = checked(bounds.Width * 4);
+            var bytes = new byte[checked(stride * data.Height)];
+            for (var y = 0; y < data.Height; y++)
+            {
+                var row = y * stride;
+                Marshal.Copy(data.Scan0 + y * data.Stride, bytes, row, stride);
+                for (var x = row + 3; x < row + stride; x += 4) bytes[x] = 255;
+            }
+            return new CapturedFrame(bounds, stride, bytes);
         }
         finally
         {
             bitmap.UnlockBits(data);
+        }
+    }
+
+    private static void DrawCursor(Graphics graphics, PixelRect bounds)
+    {
+        var cursor = new NativeMethods.CursorInfo { Size = Marshal.SizeOf<NativeMethods.CursorInfo>() };
+        if (!NativeMethods.GetCursorInfo(ref cursor) || (cursor.Flags & 1) == 0 ||
+            !NativeMethods.GetIconInfo(cursor.Handle, out var icon)) return;
+        try
+        {
+            var dc = graphics.GetHdc();
+            try
+            {
+                NativeMethods.DrawIconEx(dc, cursor.Position.X - bounds.X - icon.HotspotX,
+                    cursor.Position.Y - bounds.Y - icon.HotspotY, cursor.Handle, 0, 0, 0, 0, 3);
+            }
+            finally { graphics.ReleaseHdc(dc); }
+        }
+        finally
+        {
+            if (icon.Mask != 0) NativeMethods.DeleteObject(icon.Mask);
+            if (icon.Color != 0) NativeMethods.DeleteObject(icon.Color);
         }
     }
 
@@ -170,11 +214,12 @@ internal sealed class ScreenCaptureService : IScreenCaptureService
         NativeMethods.DwmGetWindowAttributeInt(hwnd, NativeMethods.DwmwaCloaked, out var cloaked, sizeof(int)) == 0 &&
         cloaked != 0;
 
-    private static PixelRect VirtualBounds() => new(
-        NativeMethods.GetSystemMetrics(NativeMethods.SmXVirtualScreen),
-        NativeMethods.GetSystemMetrics(NativeMethods.SmYVirtualScreen),
-        NativeMethods.GetSystemMetrics(NativeMethods.SmCxVirtualScreen),
-        NativeMethods.GetSystemMetrics(NativeMethods.SmCyVirtualScreen));
+    internal static PixelRect VirtualBounds() => DesktopGeometry.Enclose(GetDisplayBounds());
+
+    internal static PixelRect[] GetDisplayBounds() => System.Windows.Forms.Screen.AllScreens.Select(screen =>
+        new PixelRect(screen.Bounds.X, screen.Bounds.Y, screen.Bounds.Width, screen.Bounds.Height)).ToArray();
+
+    internal static PixelRect? ActiveWindowBounds() => TryGetWindowBounds(NativeMethods.GetForegroundWindow());
 
     private static (double X, double Y) GetScale(System.Windows.Forms.Screen screen)
     {

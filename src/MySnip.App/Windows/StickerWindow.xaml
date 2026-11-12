@@ -5,6 +5,11 @@
         ResizeMode="NoResize" ShowInTaskbar="False" Topmost="True"
         SizeToContent="WidthAndHeight" MinWidth="40" MinHeight="40">
   <Border x:Name="Frame" BorderBrush="#8027A7E7" BorderThickness="1" Background="Transparent">
-    <Image x:Name="StickerImage" Stretch="Fill" RenderOptions.BitmapScalingMode="HighQuality"/>
+    <Grid>
+      <Image x:Name="StickerImage" Stretch="Fill" RenderOptions.BitmapScalingMode="HighQuality"/>
+      <TextBlock x:Name="ColorSample" Visibility="Collapsed" IsHitTestVisible="False"
+                 HorizontalAlignment="Right" VerticalAlignment="Bottom" Padding="5,2"
+                 Background="#DD202020" Foreground="White"/>
+    </Grid>
   </Border>
 </Window>

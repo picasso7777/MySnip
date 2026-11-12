@@ -1,5 +1,6 @@
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Collections.Specialized;
 using System.Windows;
 using System.Windows.Media.Imaging;
 using MySnip.Core.Services;
@@ -8,46 +9,59 @@ namespace MySnip.App.Services;
 
 internal sealed class ClipboardService : IClipboardService
 {
+    internal Uri? ReadImageUrl() => Retry(() => WebStickerService.FindImageUrl(Clipboard.GetDataObject()));
     public byte[]? TryGetPng()
     {
-        return Retry(() =>
+        var source = ReadStickers(includeText: false).FirstOrDefault();
+        return source is null ? null : EncodePng(source.Frames[0]);
+    }
+
+    internal IReadOnlyList<StickerContent> ReadStickers(bool includeText = true) =>
+        Retry<IReadOnlyList<StickerContent>>(() =>
         {
+            var paths = Clipboard.ContainsFileDropList()
+                ? Clipboard.GetFileDropList().Cast<string>().Where(path => StickerContent.Supports(path) && File.Exists(path)).ToArray()
+                : [];
+            if (paths.Length > 0) return paths.Select(StickerContent.Load).ToArray();
+
+            var png = Clipboard.GetData("PNG");
+            if (png is MemoryStream pngStream) return [new StickerContent(BitmapFactory.FromPng(pngStream.ToArray()))];
+            if (png is byte[] pngData) return [new StickerContent(BitmapFactory.FromPng(pngData))];
             if (Clipboard.ContainsImage())
             {
                 var bitmap = Clipboard.GetImage();
-                if (bitmap is not null) return EncodePng(bitmap);
-            }
-
-            if (Clipboard.ContainsFileDropList())
-            {
-                var path = Clipboard.GetFileDropList().Cast<string>().FirstOrDefault(IsSupportedImage);
-                if (path is not null)
+                if (bitmap is not null)
                 {
-                    using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                    var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
-                    return EncodePng(decoder.Frames[0]);
+                    bitmap.Freeze();
+                    return [new StickerContent(bitmap)];
                 }
             }
+            if (!includeText) return [];
+            var text = Clipboard.ContainsText() ? Clipboard.GetText() : string.Empty;
+            if (StickerText.TryParseColor(text, out var color)) return [StickerText.ColorCard(color)];
+            if (Clipboard.ContainsText(TextDataFormat.Html))
+                return [new StickerContent(StickerText.Render(text, Clipboard.GetText(TextDataFormat.Html)))];
+            return string.IsNullOrWhiteSpace(text) ? [] : [new StickerContent(StickerText.Render(text))];
+        }) ?? [];
 
-            return null;
-        });
-    }
+    public void SetPng(byte[] pngBytes) => SetPng(pngBytes, null);
 
-    public void SetPng(byte[] pngBytes)
+    internal void SetPng(byte[] pngBytes, string? file)
     {
         ArgumentNullException.ThrowIfNull(pngBytes);
         Retry<object?>(() =>
         {
             using var stream = new MemoryStream(pngBytes, false);
             var bitmap = BitmapFrame.Create(stream, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
-            Clipboard.SetImage(bitmap);
+            var data = new DataObject();
+            data.SetImage(bitmap);
+            if (file is not null) data.SetFileDropList(new StringCollection { file });
+            using var png = new MemoryStream(pngBytes, false);
+            data.SetData("PNG", png, autoConvert: false);
+            Clipboard.SetDataObject(data, copy: true);
             return null;
         });
     }
-
-    private static bool IsSupportedImage(string path) =>
-        File.Exists(path) && new[] { ".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp" }
-            .Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase);
 
     internal static byte[] EncodePng(BitmapSource source)
     {

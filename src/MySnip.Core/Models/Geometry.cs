@@ -65,6 +65,35 @@ public sealed record ScreenDescriptor(string DeviceName, PixelRect Bounds, doubl
         Bounds.Y + (int)Math.Round(point.Y * DpiScaleY));
 }
 
+public static class DesktopGeometry
+{
+    public static PixelRect Enclose(IEnumerable<PixelRect> displays)
+    {
+        var bounds = displays.Where(display => !display.IsEmpty).ToArray();
+        return bounds.Length == 0 ? default : PixelRect.FromPoints(
+            new PixelPoint(bounds.Min(display => display.Left), bounds.Min(display => display.Top)),
+            new PixelPoint(bounds.Max(display => display.Right), bounds.Max(display => display.Bottom)));
+    }
+
+    public static PixelRect DisplayAt(IEnumerable<PixelRect> displays, PixelPoint point, PixelRect fallback)
+    {
+        var nearest = fallback;
+        var distance = double.PositiveInfinity;
+        foreach (var display in displays)
+        {
+            if (display.IsEmpty) continue;
+            if (display.Contains(point)) return display;
+            var dx = point.X - (double)Math.Clamp(point.X, display.Left, display.Right - 1);
+            var dy = point.Y - (double)Math.Clamp(point.Y, display.Top, display.Bottom - 1);
+            var candidate = dx * dx + dy * dy;
+            if (candidate >= distance) continue;
+            nearest = display;
+            distance = candidate;
+        }
+        return nearest;
+    }
+}
+
 public enum ResizeHandle { Left, Top, Right, Bottom, TopLeft, TopRight, BottomLeft, BottomRight }
 
 public enum SelectionHitTarget

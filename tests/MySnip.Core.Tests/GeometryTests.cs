@@ -2,6 +2,42 @@ using MySnip.Core.Models;
 
 namespace MySnip.Core.Tests;
 
+public sealed class DesktopGeometryTests
+{
+    private static readonly PixelRect Left = new(-1600, -200, 1600, 900);
+    private static readonly PixelRect Primary = new(0, 0, 1920, 1080);
+    private static readonly PixelRect Above = new(1920, -1200, 1920, 1200);
+
+    [Fact]
+    public void VirtualDesktopEnclosesDisplaysWithNegativeAndOffsetOrigins()
+    {
+        Assert.Equal(new PixelRect(-1600, -1200, 5440, 2280), DesktopGeometry.Enclose([Left, Primary, Above]));
+    }
+
+    [Fact]
+    public void DisplaySelectionUsesPhysicalCoordinatesAndFindsNearestDisplayInAGap()
+    {
+        PixelRect[] displays = [Left, Primary, Above];
+        var desktop = DesktopGeometry.Enclose(displays);
+        Assert.Equal(Left, DesktopGeometry.DisplayAt(displays, new PixelPoint(-1, 20), desktop));
+        Assert.Equal(Primary, DesktopGeometry.DisplayAt(displays, new PixelPoint(0, 20), desktop));
+        Assert.Equal(Above, DesktopGeometry.DisplayAt(displays, new PixelPoint(1910, -1000), desktop));
+    }
+
+    [Fact]
+    public void AcrossMonitorRegionRoundTripsThroughOverlayCoordinates()
+    {
+        var desktop = DesktopGeometry.Enclose([Left, Primary, Above]);
+        var layout = OverlayCoordinateMapper.Create(desktop, 144, 144);
+        var start = new PixelPoint(-15, 10);
+        var end = new PixelPoint(25, 50);
+        var local = PixelRect.FromPoints(layout.PhysicalToCanvas(start), layout.PhysicalToCanvas(end));
+        Assert.Equal(new PixelRect(1585, 1210, 40, 40), local);
+        Assert.Equal(start, layout.CanvasToPhysical(new PixelPoint(local.Left, local.Top)));
+        Assert.Equal(end, layout.CanvasToPhysical(new PixelPoint(local.Right, local.Bottom)));
+    }
+}
+
 public sealed class GeometryTests
 {
     [Fact]
