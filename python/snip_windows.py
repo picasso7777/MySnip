@@ -260,7 +260,7 @@ def capture_desktop(include_cursor=False):
         except ScreenShotError as ex:
             raise OSError(str(ex)) from ex
     else:
-        image = ImageGrab.grab(all_screens=True).convert("RGB")
+        image = ImageGrab.grab(include_layered_windows=True, all_screens=True).convert("RGB")
         if image.size != (bounds["width"], bounds["height"]):
             raise OSError("擷取期間螢幕配置已變更。")
     if include_cursor:

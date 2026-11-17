@@ -6,13 +6,32 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 
-from PIL import Image, ImageDraw, ImageOps, ImageTk
+from PIL import Image, ImageDraw, ImageFilter, ImageOps, ImageTk
 
 from snip_capture import ordered_box, valid_box
 from snip_drop import DropTarget
 from snip_images import RESAMPLE, TRANSPOSE, StickerAsset, color_card, save_image
 from snip_native import WindowsShare
-from snip_windows import copy_image, copy_text, hwnd, position_window, reset_layered_surface, set_click_through, show_layered_image
+from snip_windows import (copy_image, copy_text, hwnd, position_window, reset_layered_surface,
+                          set_click_through, show_layered_image, user32)
+
+GLOW_PADDING = 8
+
+
+def sticker_glow(size, selected):
+    width, height = size
+    pad = GLOW_PADDING
+    mask = Image.new("L", (width + pad * 2, height + pad * 2))
+    edge = (pad - 1, pad - 1, pad + width, pad + height)
+    ImageDraw.Draw(mask).rectangle(edge, fill=255)
+    mask = mask.filter(ImageFilter.GaussianBlur(2.6))
+    mask = mask.point(lambda alpha: round(alpha * (0.80 if selected else 0.62)))
+    draw = ImageDraw.Draw(mask)
+    draw.rectangle(edge, outline=225 if selected else 172)
+    draw.rectangle((pad, pad, pad + width - 1, pad + height - 1), fill=0)
+    glow = Image.new("RGBA", mask.size, "#3d8dff")
+    glow.putalpha(mask)
+    return glow
 
 
 class StickerWindow:
@@ -47,9 +66,11 @@ class StickerWindow:
         self._share = None
         self._drop_target = None
         self._layered = False
+        self._glow_window = None
+        self._glow_key = None
         self._origin = None
         self._right_origin = None
-        self.label = tk.Label(self.top, bd=0, highlightthickness=2, highlightbackground="#547e91")
+        self.label = tk.Label(self.top, bd=0, highlightthickness=0, padx=0, pady=0)
         self.label.pack()
         self.top.attributes("-topmost", self.topmost)
         self.top.attributes("-alpha", self.opacity)
@@ -70,7 +91,7 @@ class StickerWindow:
             self.label.bind(key, action)
         for key, action in {
             "<Escape>": lambda: self._escape(False), "<Shift-Escape>": lambda: self._escape(True), "<Delete>": self.close,
-            "<space>": self._space, "<1>": lambda: self._rotate_or_step(-1), "<2>": lambda: self._rotate_or_step(1),
+            "<space>": self._space, "<1>": lambda: self._step_animation(-1), "<2>": lambda: self._step_animation(1),
             "<3>": lambda: self.change("flip_x"), "<4>": lambda: self.change("flip_y"),
             "<5>": lambda: self.change("grayscale"), "<6>": lambda: self.change("invert"),
             "<KeyPress-p>": lambda: self.change("click_through"), "<Control-c>": self.copy,
@@ -79,6 +100,7 @@ class StickerWindow:
             self.top.bind(key, lambda _, callback=action: callback())
         self._swatch = tk.Label(self.top, background="#202020", foreground="white", padx=3)
         self.label.bind("<Leave>", lambda _: self._swatch.place_forget())
+        self.top.bind("<FocusIn>", lambda _: self._position_glow())
         self.top.bind("<KeyRelease-Alt_L>", lambda _: self._swatch.place_forget())
         self.top.bind("<KeyRelease-Alt_R>", lambda _: self._swatch.place_forget())
         for key, direction in (("<plus>", 1), ("<minus>", -1), ("<KP_Add>", 1), ("<KP_Subtract>", -1)):
@@ -120,13 +142,11 @@ class StickerWindow:
 
     def render(self):
         source = self.image()
-        if self.thumbnail:
-            scale = min(1, self.thumbnail_width / source.width)
-        else:
-            scale = min(1, 640 / max(source.size)) * self.zoom
-        scale = min(scale, 4096 / max(source.size))
+        scale = min(1, self.thumbnail_width / source.width) if self.thumbnail else self.zoom
+        # Limit additional magnification of large images without shrinking the native 100% size.
+        scale = min(scale, max(1, 4096 / max(source.size)))
         size = max(1, round(source.width * scale)), max(1, round(source.height * scale))
-        display = source.resize(size, RESAMPLE.LANCZOS)
+        display = source if size == source.size else source.resize(size, RESAMPLE.LANCZOS)
         self._display_size = size
         if self.background == "clickable" and self.visible:
             self._render_clickable(display)
@@ -159,15 +179,14 @@ class StickerWindow:
         except tk.TclError:
             pass
         self.photo = ImageTk.PhotoImage(display, master=self.top)
-        self.label.configure(image=self.photo, highlightbackground="#27a7e7" if self.selected else "#547e91")
+        self.label.configure(image=self.photo)
+        self._update_glow()
 
     def _render_clickable(self, display):
         width, height = display.size
-        border = "#27a7e7" if self.selected else "#547e91"
-        surface = Image.new("RGBA", (width + 4, height + 4), border)
         # A minimal nonzero alpha keeps fully transparent pixels in the hit-test region.
-        surface.paste((0, 0, 0, max(1, round(1 / self.opacity))), (2, 2, width + 2, height + 2))
-        surface.alpha_composite(display, (2, 2))
+        surface = Image.new("RGBA", (width, height), (0, 0, 0, max(1, round(1 / self.opacity))))
+        surface.alpha_composite(display)
         self.photo = ImageTk.PhotoImage(display, master=self.top)
         self.label.configure(image=self.photo)
         self.top.update_idletasks()
@@ -179,6 +198,46 @@ class StickerWindow:
         except OSError:
             self.background = "solid"
             self.render()
+            return
+        self._update_glow()
+
+    def _update_glow(self):
+        if not self.visible or self.click_through:
+            if self._glow_window is not None:
+                self._glow_window.withdraw()
+            return
+
+        width, height = self._display_size
+        if self._glow_window is None:
+            window = self._glow_window = tk.Toplevel(self.top)
+            window.withdraw()
+            window.overrideredirect(True)
+            window.resizable(False, False)
+            window.attributes("-topmost", self.topmost)
+            window.geometry("1x1+0+0")
+            window.update_idletasks()
+            handle = hwnd(window)
+            # The glow is a separate transparent surface behind the image and never takes input.
+            user32.SetWindowLongPtrW(handle, -20, user32.GetWindowLongPtrW(handle, -20) | 0x080000A0)
+            set_click_through(window, True)
+        window = self._glow_window
+        key = (width, height, self.selected, self.opacity)
+        if key != self._glow_key:
+            try:
+                show_layered_image(window, sticker_glow((width, height), self.selected), self.opacity)
+            except OSError:
+                window.withdraw()
+                return
+            self._glow_key = key
+        self._position_glow()
+
+    def _position_glow(self):
+        if self._glow_window is None or not self.visible or self.click_through:
+            return
+        # Keep the layered surface immediately below its sticker without activating either window.
+        width, height = self._display_size
+        user32.SetWindowPos(hwnd(self._glow_window), hwnd(self.top), self.x - GLOW_PADDING, self.y - GLOW_PADDING,
+                            width + 2 * GLOW_PADDING, height + 2 * GLOW_PADDING, 0x0010 | 0x0040)
 
     def set_visible(self, visible):
         if self.closed or visible == self.visible:
@@ -190,15 +249,25 @@ class StickerWindow:
             set_click_through(self.top, self.click_through)
             if self.background == "clickable":
                 self.render()
+            else:
+                self._update_glow()
             self._schedule_frame()
         else:
             self._stop_frame()
             self.top.withdraw()
+            self._update_glow()
 
     def place(self, x, y):
         self.x, self.y = int(x), int(y)
         if self.visible:
             position_window(self.top, self.x, self.y)
+            self._position_glow()
+
+    def move_to_desktop(self, desktops, desktop):
+        desktops.move(hwnd(self.top), desktop)
+        if self._glow_window is not None:
+            desktops.move(hwnd(self._glow_window), desktop)
+            self._position_glow()
 
     def replace(self, asset):
         self.asset = asset
@@ -229,7 +298,8 @@ class StickerWindow:
     def _end_drag(self, event):
         if self._origin is not None:
             self._origin = None
-            self.app.workspace_changed()
+            if any((sticker.x, sticker.y) != position for sticker, position in self._drag_positions.items()):
+                self.app.workspace_changed()
 
     def _double_click(self, event):
         self._origin = None
@@ -268,6 +338,7 @@ class StickerWindow:
                     sticker.render()
                 else:
                     sticker.top.attributes("-alpha", sticker.opacity)
+                    sticker._update_glow()
         elif self.asset.animated:
             self.speed = max(0.1, min(8, self.speed * (1.25 ** direction)))
             self._schedule_frame()
@@ -285,22 +356,27 @@ class StickerWindow:
             setattr(sticker, attribute, value)
             if attribute == "click_through":
                 set_click_through(sticker.top, value)
+                sticker._update_glow()
             elif attribute == "topmost":
                 sticker.top.attributes("-topmost", value)
+                if sticker._glow_window is not None:
+                    sticker._glow_window.attributes("-topmost", value)
+                    sticker._position_glow()
             else:
                 sticker.render()
         self.app.workspace_changed()
 
-    def _rotate_or_step(self, direction):
+    def _step_animation(self, direction):
         if self.asset.animated:
             self.playing = False
             self._stop_frame()
             self._step(direction)
-        else:
-            for sticker in self.app.targets(self):
-                sticker.rotation = (sticker.rotation + direction * 90) % 360
-                sticker.render()
-            self.app.workspace_changed()
+
+    def _rotate(self, direction):
+        for sticker in self.app.targets(self):
+            sticker.rotation = (sticker.rotation + direction * 90) % 360
+            sticker.render()
+        self.app.workspace_changed()
 
     def _space(self):
         if self.asset.animated:
@@ -362,6 +438,8 @@ class StickerWindow:
             self._drop_target = None
         if self._share:
             self._share.close()
+        if self._glow_window is not None:
+            self._glow_window.destroy()
         self.top.destroy()
         self.app.remove_sticker(self)
 
@@ -405,12 +483,18 @@ class StickerWindow:
 
     def _menu(self, event):
         menu = tk.Menu(self.top, tearoff=False)
+        orientation_actions = (
+            ("上一格 1", lambda: self._step_animation(-1)),
+            ("下一格 2", lambda: self._step_animation(1)),
+        ) if self.asset.animated else (
+            ("逆時針旋轉 90°", lambda: self._rotate(-1)),
+            ("順時針旋轉 90°", lambda: self._rotate(1)),
+        )
         for label, command in (
             ("複製 Ctrl+C", self.copy), ("另存 Ctrl+S", self.save), ("使用 Windows 分享…", self.share),
             ("編輯標註／播放 GIF Space", self._space),
             ("裁切圖片…", self._crop), ("載入圖片網址…", lambda: self.app.load_sticker_url(self)),
-            ("逆時針旋轉／上一格 1", lambda: self._rotate_or_step(-1)),
-            ("順時針旋轉／下一格 2", lambda: self._rotate_or_step(1)),
+            *orientation_actions,
             ("水平翻轉 3", lambda: self.change("flip_x")), ("垂直翻轉 4", lambda: self.change("flip_y")),
             ("灰階 5", lambda: self.change("grayscale")), ("反相 6", lambda: self.change("invert")),
             ("設定縮放比例…", self._set_zoom), ("切換縮圖 Shift+雙擊", lambda: self.change("thumbnail")),

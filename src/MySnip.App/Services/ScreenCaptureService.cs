@@ -27,13 +27,7 @@ internal sealed class ScreenCaptureService : IScreenCaptureService
         using (var graphics = Graphics.FromImage(bitmap))
         {
             graphics.Clear(Color.Black);
-            foreach (var display in displays.Distinct())
-            {
-                var area = display.ClampTo(bounds);
-                if (area.IsEmpty) continue;
-                graphics.CopyFromScreen(area.Left, area.Top, area.Left - bounds.Left, area.Top - bounds.Top,
-                    new Size(area.Width, area.Height), CopyPixelOperation.SourceCopy);
-            }
+            CopyDesktop(graphics, displays, bounds);
             if (includeCursor) DrawCursor(graphics, bounds);
         }
 
@@ -54,6 +48,31 @@ internal sealed class ScreenCaptureService : IScreenCaptureService
         {
             bitmap.UnlockBits(data);
         }
+    }
+
+    private static void CopyDesktop(Graphics graphics, PixelRect[] displays, PixelRect bounds)
+    {
+        var screen = NativeMethods.GetDC(0);
+        if (screen == 0) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+
+        try
+        {
+            var destination = graphics.GetHdc();
+            try
+            {
+                const uint operation = (uint)(CopyPixelOperation.SourceCopy | CopyPixelOperation.CaptureBlt);
+                foreach (var display in displays.Distinct())
+                {
+                    var area = display.ClampTo(bounds);
+                    if (area.IsEmpty) continue;
+                    if (!NativeMethods.BitBlt(destination, area.Left - bounds.Left, area.Top - bounds.Top,
+                            area.Width, area.Height, screen, area.Left, area.Top, operation))
+                        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                }
+            }
+            finally { graphics.ReleaseHdc(destination); }
+        }
+        finally { NativeMethods.ReleaseDC(0, screen); }
     }
 
     private static void DrawCursor(Graphics graphics, PixelRect bounds)
