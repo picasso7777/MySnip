@@ -68,10 +68,13 @@ public sealed partial class CaptureOverlayWindow
 
     private void SetDrawingColor(Color color)
     {
-        _drawingColor = color;
-        if (_preferences.RememberToolColors && _tool != AnnotationTool.Select)
+        FinishTextEditor();
+        var tool = ContextTool;
+        if (SelectedAnnotation() is { } annotation) ChangeAnnotationColor(annotation, color);
+        else _drawingColor = color;
+        if (_preferences.RememberToolColors && tool != AnnotationTool.Select)
         {
-            _toolColors[_tool] = color.ToString();
+            _toolColors[tool] = color.ToString();
             _styleDirty = true;
         }
         UpdateColorPreview();
@@ -155,10 +158,11 @@ public sealed partial class CaptureOverlayWindow
         var menu = new ContextMenu();
         if (index is { } swatch)
         {
-            Add("以目前顏色取代", () => { _palette[swatch] = _drawingColor.ToString(); PaletteChanged(); });
+            Add("以目前顏色取代", () => { _palette[swatch] = ContextColor.ToString(); PaletteChanged(); });
             if (_palette.Count > 1) Add("移除這個顏色", () => { _palette.RemoveAt(swatch); PaletteChanged(); });
         }
-        if (_palette.Count < 40) Add("將目前顏色加入色盤", () => { _palette.Add(_drawingColor.ToString()); PaletteChanged(); });
+        if (_palette.Count < 40) Add("將目前顏色加入色盤", () => { _palette.Add(ContextColor.ToString()); PaletteChanged(); });
+        Add("自訂色盤…", EditPalette);
         Add("匯入色盤…", ImportPalette);
         Add("匯出色盤…", ExportPalette);
         Add("還原預設色盤", () => { _palette = _defaultPalette.ToList(); PaletteChanged(); });
@@ -179,6 +183,21 @@ public sealed partial class CaptureOverlayWindow
         ColorPalette.ContextMenu = CreatePaletteMenu();
     }
 
+    private static bool TryNormalizePalette(IEnumerable<string> values, out List<string> colors)
+    {
+        colors = values.Select(color => color is { Length: 7 } && color[0] == '#' ? "#FF" + color[1..] : color).ToList();
+        return colors.Count is >= 1 and <= 40 && colors.All(AdvancedPreferences.IsColor);
+    }
+
+    private void EditPalette()
+    {
+        var value = InputDialog.Show(this, "自訂色盤", "輸入 1–40 個 #RRGGBB 或 #AARRGGBB 色碼，以逗號分隔。",
+            string.Join(", ", _palette), text => TryNormalizePalette(text.Split(',', StringSplitOptions.TrimEntries), out _));
+        if (value is null || !TryNormalizePalette(value.Split(',', StringSplitOptions.TrimEntries), out var colors)) return;
+        _palette = colors;
+        PaletteChanged();
+    }
+
     private void ImportPalette()
     {
         var picker = new OpenFileDialog { Filter = "MySnip 色盤|*.json" };
@@ -187,9 +206,9 @@ public sealed partial class CaptureOverlayWindow
         {
             if (new FileInfo(picker.FileName).Length > 4096) throw new InvalidDataException("色盤檔案過大。");
             var colors = JsonSerializer.Deserialize<string[]>(File.ReadAllText(picker.FileName));
-            if (colors is not { Length: >= 1 and <= 40 } || colors.Any(color => !AdvancedPreferences.IsColor(color)))
-                throw new InvalidDataException("色盤須包含 1–40 個 #AARRGGBB 色碼。");
-            _palette = colors.ToList();
+            if (colors is null || !TryNormalizePalette(colors, out var palette))
+                throw new InvalidDataException("色盤須包含 1–40 個 #RRGGBB 或 #AARRGGBB 色碼。");
+            _palette = palette;
             PaletteChanged();
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)

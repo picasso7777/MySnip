@@ -111,7 +111,6 @@ public sealed partial class App : System.Windows.Application
     {
         if (_captureActive) return;
         _captureActive = true;
-        IDisposable? hidden = null;
         try
         {
             delaySeconds = command?.Delay ?? delaySeconds;
@@ -119,7 +118,6 @@ public sealed partial class App : System.Windows.Application
             if (Dispatcher.HasShutdownStarted) return;
             var activeRegion = ScreenCaptureService.ActiveWindowBounds();
             if (command is not null) region = ResolveRegion(command, activeRegion);
-            hidden = _stickers.SuspendVisibility();
             await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.ContextIdle);
             NativeMethods.DwmFlush();
             IReadOnlyList<CaptureOutputRequest> outputs = quickCopy
@@ -130,8 +128,6 @@ public sealed partial class App : System.Windows.Application
             {
                 var quickFrame = _capture.CaptureRegion(quickRegion, _settings.IncludeCursor);
                 var image = CaptureOutput.Decorate(BitmapFactory.FromFrame(quickFrame), false, false, command?.Shadow == true);
-                hidden.Dispose();
-                hidden = null;
                 var saved = await WriteCommandOutputsAsync(outputs, quickFrame.Bounds, image, command?.Silent == true);
                 RememberCapture(quickFrame.Bounds, image, saved, command?.SkipAutoSave == true);
                 return;
@@ -160,8 +156,6 @@ public sealed partial class App : System.Windows.Application
             overlay.ShowDialog();
             if (overlay.CompletedCapture is { } result)
             {
-                hidden.Dispose();
-                hidden = null;
                 if (result.Pinned && !outputs.Any(output => output.Destination == CaptureDestination.Pin))
                     _stickers.Create(result.Image, position: new PixelPoint(result.Region.X, result.Region.Y));
                 var saved = result.Saved;
@@ -199,11 +193,7 @@ public sealed partial class App : System.Windows.Application
         {
             MessageBox.Show($"無法開始截圖：{ex.Message}", "MySnip", MessageBoxButton.OK, MessageBoxImage.Error);
         }
-        finally
-        {
-            hidden?.Dispose();
-            _captureActive = false;
-        }
+        finally { _captureActive = false; }
     }
 
     private void RememberCapture(PixelRect region, System.Windows.Media.Imaging.BitmapSource image, bool alreadySaved,

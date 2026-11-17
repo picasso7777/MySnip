@@ -16,7 +16,8 @@
     <Canvas x:Name="InputCanvas" Background="Transparent"
             MouseLeftButtonDown="Input_MouseLeftButtonDown"
             MouseMove="Input_MouseMove" MouseLeftButtonUp="Input_MouseLeftButtonUp" MouseDown="Input_MouseDown"
-            MouseWheel="Input_MouseWheel"/>
+            MouseWheel="Input_MouseWheel" LostMouseCapture="Input_LostMouseCapture"/>
+    <Canvas x:Name="TextChromeCanvas" IsHitTestVisible="False"/>
     <Border x:Name="Toolbar" Background="Transparent" Visibility="Collapsed">
       <Border.Resources>
         <Style x:Key="ToolbarToolButton" TargetType="ToggleButton">
@@ -67,7 +68,7 @@
       </Border.Resources>
       <StackPanel>
         <Border Background="#FFF9F9F9" BorderBrush="#FFBDBDBD" BorderThickness="1" Padding="2,0">
-          <StackPanel Orientation="Horizontal">
+          <WrapPanel>
             <ToggleButton x:Name="ShapeToolButton" Style="{StaticResource ToolbarToolButton}" Tag="Rectangle" ToolTip="矩形／圓形／橢圓 (Ctrl+1)" Click="Tool_Click">
               <Grid Width="22" Height="20">
                 <Rectangle Width="14" Height="10" HorizontalAlignment="Left" VerticalAlignment="Bottom" Fill="Transparent" StrokeThickness="1.5"
@@ -109,7 +110,7 @@
             <Button x:Name="PinButton" Style="{StaticResource ToolbarActionButton}" Content="&#xE718;" ToolTip="貼到螢幕 (Ctrl+T)" Click="Sticker_Click"/>
             <Button Style="{StaticResource ToolbarActionButton}" Content="&#xE74E;" ToolTip="儲存至檔案 (Ctrl+S)" Click="Save_Click"/>
             <Button Style="{StaticResource ToolbarActionButton}" Content="&#xE8C8;" ToolTip="複製並完成 (Ctrl+C / Enter)" Click="Copy_Click"/>
-          </StackPanel>
+          </WrapPanel>
         </Border>
         <Border x:Name="ContextToolbar" Background="#FFF9F9F9" BorderBrush="#FFBDBDBD" BorderThickness="1,0,1,1" Padding="4,2" HorizontalAlignment="Left">
           <WrapPanel VerticalAlignment="Center">
@@ -169,7 +170,7 @@
               <ToggleButton x:Name="MosaicOption" Style="{StaticResource OptionToggle}" Tag="Mosaic" Content="▦" ToolTip="馬賽克" Click="Tool_Click"/>
               <ToggleButton x:Name="BlurOption" Style="{StaticResource OptionToggle}" Tag="Blur" Content="▧" ToolTip="模糊" Click="Tool_Click"/>
               <ToggleButton x:Name="MagnifyOption" Style="{StaticResource OptionToggle}" Tag="Magnify" Content="⊕" ToolTip="放大標註" Click="Tool_Click"/>
-              <CheckBox x:Name="EllipseFilter" Content="橢圓" VerticalAlignment="Center" Margin="4,0"/>
+              <CheckBox x:Name="EllipseFilter" Click="Style_Changed" Content="橢圓" VerticalAlignment="Center" Margin="4,0"/>
               <TextBlock Text="強度" VerticalAlignment="Center" Margin="7,0,3,0"/>
               <Slider x:Name="FilterStrengthSlider" Width="78" Minimum="4" Maximum="28" TickFrequency="2" ValueChanged="Style_Changed"/>
               <TextBlock x:Name="FilterStrengthValue" Width="26" VerticalAlignment="Center" TextAlignment="Center"/>
@@ -177,7 +178,7 @@
             <StackPanel x:Name="TextOptions" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed">
               <ToggleButton x:Name="BoldToggle" Style="{StaticResource OptionToggle}" Content="B" FontWeight="Bold" ToolTip="粗體" Click="TextStyle_Click"/>
               <ToggleButton x:Name="ItalicToggle" Style="{StaticResource OptionToggle}" Content="I" FontStyle="Italic" ToolTip="斜體" Click="TextStyle_Click"/>
-              <CheckBox x:Name="TextBackground" Content="底色" VerticalAlignment="Center" Margin="4,0"/>
+              <CheckBox x:Name="TextBackground" Click="Style_Changed" Content="底色" VerticalAlignment="Center" Margin="4,0"/>
               <Button Content="描邊…" ToolTip="文字描邊顏色與粗細" Click="TextOutline_Click" Padding="4,1"/>
               <ComboBox x:Name="FontFamilyPicker" Width="142" Height="25" Margin="3,0" SelectionChanged="Style_Changed" DropDownOpened="FontFamilyPicker_DropDownOpened"/>
               <ComboBox x:Name="FontSizePicker" Width="52" Height="25" Margin="1,0,4,0" SelectionChanged="Style_Changed">
@@ -189,7 +190,7 @@
               <TextBlock Text="粗細" VerticalAlignment="Center" Margin="6,0,2,0"/>
               <Slider x:Name="WidthSlider" Width="72" Minimum="1" Maximum="32" TickFrequency="1" ValueChanged="Style_Changed"/>
               <TextBlock x:Name="WidthValue" Width="25" VerticalAlignment="Center" TextAlignment="Center"/>
-              <CheckBox x:Name="DashedStroke" Content="虛線" VerticalAlignment="Center" Margin="4,0"/>
+              <CheckBox x:Name="DashedStroke" Click="Style_Changed" Content="虛線" VerticalAlignment="Center" Margin="4,0"/>
             </StackPanel>
             <StackPanel x:Name="ColorOptions" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed">
               <Border x:Name="CurrentColorPreview" Width="23" Height="23" BorderBrush="#FF333333" BorderThickness="1" Margin="4,0,2,0"/>

@@ -3,13 +3,21 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         ResizeMode="NoResize" ShowInTaskbar="False" Topmost="True"
-        SizeToContent="WidthAndHeight" MinWidth="40" MinHeight="40">
-  <Border x:Name="Frame" BorderBrush="#8027A7E7" BorderThickness="1" Background="Transparent">
-    <Grid>
-      <Image x:Name="StickerImage" Stretch="Fill" RenderOptions.BitmapScalingMode="HighQuality"/>
-      <TextBlock x:Name="ColorSample" Visibility="Collapsed" IsHitTestVisible="False"
-                 HorizontalAlignment="Right" VerticalAlignment="Bottom" Padding="5,2"
-                 Background="#DD202020" Foreground="White"/>
-    </Grid>
-  </Border>
+        SizeToContent="WidthAndHeight">
+  <Grid x:Name="StickerSurface" Margin="8">
+    <Border x:Name="Frame" Background="Transparent" MinWidth="40" MinHeight="40">
+      <Grid>
+        <Image x:Name="StickerImage" Stretch="Fill" RenderOptions.BitmapScalingMode="HighQuality"/>
+        <TextBlock x:Name="ColorSample" Visibility="Collapsed" IsHitTestVisible="False"
+                   HorizontalAlignment="Right" VerticalAlignment="Bottom" Padding="5,2"
+                   Background="#DD202020" Foreground="White"/>
+      </Grid>
+    </Border>
+    <Border x:Name="GlowOutline" BorderBrush="#AD589BFF" BorderThickness="1" IsHitTestVisible="False">
+      <Border.Effect>
+        <DropShadowEffect x:Name="StickerGlow" Color="#3D8DFF" ShadowDepth="0" BlurRadius="9" Opacity="0.85"
+                          RenderingBias="Quality"/>
+      </Border.Effect>
+    </Border>
+  </Grid>
 </Window>

@@ -22,7 +22,7 @@ namespace MySnip.App.Windows;
 
 public sealed partial class CaptureOverlayWindow : Window
 {
-    private enum DragMode { None, CreateSelection, MoveSelection, ResizeLeft, ResizeTop, ResizeRight, ResizeBottom, ResizeTopLeft, ResizeTopRight, ResizeBottomLeft, ResizeBottomRight, Draw, MoveElement, SelectAnnotations }
+    private enum DragMode { None, CreateSelection, MoveSelection, ResizeLeft, ResizeTop, ResizeRight, ResizeBottom, ResizeTopLeft, ResizeTopRight, ResizeBottomLeft, ResizeBottomRight, Draw, DrawText, MoveElement, MoveInlineText, ResizeAnnotation, SelectAnnotations }
 
     private CapturedFrame _frame;
     private BitmapSource _bitmap;
@@ -73,9 +73,9 @@ public sealed partial class CaptureOverlayWindow : Window
         _drawingOpacity = defaults.Opacity;
         _bitmap = BitmapFactory.FromFrame(frame);
         Screenshot.Source = _bitmap;
+        CreateSelectionHandles();
         ConfigureCanvas();
         ConfigureStyleControls(defaults);
-        CreateSelectionHandles();
         UpdateSelectionVisual();
         SourceInitialized += OnSourceInitialized;
         Closing += (_, _) => SaveCanceledCapture();
@@ -123,6 +123,14 @@ public sealed partial class CaptureOverlayWindow : Window
         {
             var handle = new Rectangle { Width = 8, Height = 8, Fill = Brushes.White, Stroke = new SolidColorBrush(Color.FromRgb(39, 167, 231)), StrokeThickness = 1 };
             _handles.Add(handle); MaskCanvas.Children.Add(handle);
+        }
+        var annotationFill = new SolidColorBrush(Color.FromRgb(39, 167, 231));
+        for (var i = 0; i < _annotationResizeHandles.Length; i++)
+        {
+            var handle = new Ellipse { Width = 7, Height = 7, Fill = annotationFill, Stroke = Brushes.White,
+                StrokeThickness = 1, Visibility = Visibility.Collapsed };
+            _annotationResizeHandles[i] = handle;
+            MaskCanvas.Children.Add(handle);
         }
     }
 
@@ -201,6 +209,7 @@ public sealed partial class CaptureOverlayWindow : Window
 
     private void OnClosed(object? sender, EventArgs e)
     {
+        RemoveTextCaret();
         _share?.Dispose();
         SaveAdvancedChanges();
         if (_windowSource is not null)
@@ -216,8 +225,25 @@ public sealed partial class CaptureOverlayWindow : Window
 
     private void Input_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
+        var pointer = PointerPosition(e);
+        var activeHandle = HitAnnotationHandle(pointer);
+        if (activeHandle is { Element: OutlinedAnnotationText target } && IsTextDeleteHandle(target, activeHandle.Value.Direction))
+        {
+            _currentPoint = pointer;
+            DeleteTextFromHandle(target);
+            e.Handled = true;
+            return;
+        }
+        if (activeHandle is null && _textEditor is not null && IsInTextFrame(pointer))
+        {
+            StartInlineTextMove(pointer, -1);
+            return;
+        }
+        _resumeTextAfterResize = _textEditor is not null && activeHandle is { Element: OutlinedAnnotationText } &&
+            !string.IsNullOrWhiteSpace(_textEditor.Text);
+        FinishTextEditor();
         Focus();
-        _start = PointerPosition(e);
+        _start = pointer;
         _currentPoint = _start;
         _startSelection = _selection;
         InputCanvas.CaptureMouse();
@@ -233,7 +259,28 @@ public sealed partial class CaptureOverlayWindow : Window
             return;
         }
 
-        if (e.ClickCount == 2 && _tool == AnnotationTool.Select && _selection.Contains(ToPixel(_start)))
+        if (HitAnnotationHandle(_start) is { } handle)
+        {
+            _annotationResize = (handle.Element, AnnotationResizeBounds(handle.Element), handle.Direction,
+                handle.Element is OutlinedAnnotationText textTarget ? textTarget.FontSize : 0);
+            _dragMode = DragMode.ResizeAnnotation;
+            InputCanvas.Cursor = AnnotationResizeCursor(handle.Element, handle.Direction);
+            return;
+        }
+
+        var inside = _selection.Contains(ToPixel(_start));
+        var hit = _tool != AnnotationTool.Eraser && _lineStrip is null
+            ? FindAnnotationAt(_start, precise: _tool != AnnotationTool.Select) : null;
+        if (e.ClickCount == 2 && hit is OutlinedAnnotationText text)
+        {
+            InputCanvas.ReleaseMouseCapture();
+            SelectAnnotations([text]);
+            EditAnnotationText(text);
+            return;
+        }
+        if (hit is not null && StartAnnotationSelection(_start, hit)) return;
+
+        if (e.ClickCount == 2 && _tool == AnnotationTool.Select && inside)
         {
             InputCanvas.ReleaseMouseCapture();
             CopyAndClose();
@@ -242,8 +289,7 @@ public sealed partial class CaptureOverlayWindow : Window
 
         if (_tool == AnnotationTool.Select)
         {
-            var hit = FindAnnotationAt(_start);
-            if (StartAnnotationSelection(_start, hit)) return;
+            if (StartAnnotationSelection(_start, null)) return;
 
             if (_editingSticker)
             {
@@ -262,7 +308,8 @@ public sealed partial class CaptureOverlayWindow : Window
             return;
         }
 
-        if (_selection.IsEmpty || !_selection.Contains(ToPixel(_start)))
+        SelectAnnotations([]);
+        if (_selection.IsEmpty || !inside && !CanDrawOutsideSelection(_tool))
         {
             if (_editingSticker) { InputCanvas.ReleaseMouseCapture(); return; }
             ReplayedScreenshot.Source = null;
@@ -298,9 +345,7 @@ public sealed partial class CaptureOverlayWindow : Window
 
         if (_tool == AnnotationTool.Text)
         {
-            BeginText(_start);
-            _dragMode = DragMode.None;
-            InputCanvas.ReleaseMouseCapture();
+            StartTextBox();
             return;
         }
 
@@ -325,10 +370,10 @@ public sealed partial class CaptureOverlayWindow : Window
             if (!_isSelectionCommitted)
             {
                 UpdateHover(point);
-                Cursor = Cursors.Cross;
+                InputCanvas.Cursor = Cursors.Cross;
                 return;
             }
-            Cursor = CursorFor(HitSelectionEdge(point));
+            UpdatePointerCursor(point);
             return;
         }
 
@@ -365,18 +410,50 @@ public sealed partial class CaptureOverlayWindow : Window
                 _selection = SelectionGeometry.Resize(_startSelection, ToResizeHandle(_dragMode), ToPixel(point), CanvasBounds);
                 UpdateSelectionVisual();
                 break;
+            case DragMode.DrawText: UpdateTextBoxPreview(point); break;
             case DragMode.Draw:
-                UpdateDrawingElement(_activeElement, _start, point);
+                UpdateDrawingElement(_activeElement, _start, point, _tool, _drawingWidth);
                 break;
             case DragMode.MoveElement: UpdateAnnotationMove(point); break;
+            case DragMode.MoveInlineText: MoveInlineText(point); break;
+            case DragMode.ResizeAnnotation: UpdateAnnotationResize(point); break;
             case DragMode.SelectAnnotations: UpdateMarquee(point); break;
         }
     }
 
+    private void Input_LostMouseCapture(object sender, MouseEventArgs e)
+    {
+        CancelAnnotationResize();
+        if (_dragMode == DragMode.MoveInlineText) EndInlineTextMove(_start, cancel: true);
+        if (_dragMode != DragMode.DrawText) return;
+        _dragMode = DragMode.None;
+        RemoveTextBoxPreview();
+    }
+
     private void Input_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
-        var point = ClampToSelectionIfDrawing(PointerPosition(e));
-        _currentPoint = point;
+        _currentPoint = PointerPosition(e);
+        var point = ClampToSelectionIfDrawing(_currentPoint);
+        if (_dragMode == DragMode.MoveInlineText)
+        {
+            EndInlineTextMove(point);
+            return;
+        }
+        if (_dragMode == DragMode.ResizeAnnotation)
+        {
+            EndAnnotationResize(point);
+            _dragMode = DragMode.None;
+            InputCanvas.ReleaseMouseCapture();
+            UpdatePointerCursor(point);
+            return;
+        }
+        if (_dragMode == DragMode.DrawText)
+        {
+            _dragMode = DragMode.None;
+            InputCanvas.ReleaseMouseCapture();
+            OpenNewTextBox(point);
+            return;
+        }
         InputCanvas.ReleaseMouseCapture();
         if (_dragMode == DragMode.CreateSelection && !_isSelectionCommitted)
         {
@@ -411,16 +488,34 @@ public sealed partial class CaptureOverlayWindow : Window
                 {
                     AnnotationCanvas.Children.Remove(element);
                     element = CreateFilteredRegion(PixelRect.FromPoints(ToPixel(_start), ToPixel(point)), _tool);
+                    AddAnnotationCommand(element);
                 }
-                AddAnnotationCommand(element);
+                else
+                {
+                    UpdateDrawingElement(element, _start, point, _tool, _drawingWidth);
+                    if (IsResizableShape(element) && (element.Width < 1 || element.Height < 1))
+                        AnnotationCanvas.Children.Remove(element);
+                    else AddAnnotationCommand(element);
+                }
             }
         }
         else if (_dragMode == DragMode.MoveElement) EndAnnotationMove(point);
         else if (_dragMode == DragMode.SelectAnnotations) CommitMarquee(point);
+        else RefreshAnnotationFilters();
 
         _activeElement = null;
         _dragMode = DragMode.None;
         UpdateSelectionVisual();
+        UpdatePointerCursor(_currentPoint);
+    }
+
+    private void UpdatePointerCursor(Point point)
+    {
+        InputCanvas.Cursor = HitAnnotationHandle(point) is { } handle
+            ? IsTextDeleteHandle(handle.Element, handle.Direction) ? Cursors.Hand : AnnotationResizeCursor(handle.Element, handle.Direction)
+            : IsInTextFrame(point) ? Cursors.SizeAll
+            : _isSelectionCommitted && !_editingSticker && _tool == AnnotationTool.Select ? CursorFor(HitSelectionEdge(point))
+            : _tool == AnnotationTool.Select && _isSelectionCommitted ? Cursors.Arrow : Cursors.Cross;
     }
 
     private DragMode HitSelectionEdge(Point point)
@@ -475,8 +570,10 @@ public sealed partial class CaptureOverlayWindow : Window
         Canvas.SetTop(SizeLabel, Math.Clamp(s.Top - 26, display.Top, Math.Max(display.Top, display.Bottom - SizeLabel.DesiredSize.Height)));
         var showCommittedControls = _isSelectionCommitted && !_selection.IsEmpty;
         UpdateHandlePositions(s, showCommittedControls);
+        UpdateAnnotationOutlines();
         Toolbar.Visibility = showCommittedControls ? Visibility.Visible : Visibility.Collapsed;
-        Toolbar.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        Toolbar.MaxWidth = Math.Max(1, display.Width);
+        Toolbar.Measure(new Size(display.Width, double.PositiveInfinity));
         var toolbarLeft = Math.Clamp(s.Left, display.Left, Math.Max(display.Left, display.Right - Toolbar.DesiredSize.Width));
         var below = s.Bottom + 8;
         var toolbarTop = below + Toolbar.DesiredSize.Height <= display.Bottom ? below : s.Top - Toolbar.DesiredSize.Height - 8;
@@ -513,9 +610,15 @@ public sealed partial class CaptureOverlayWindow : Window
         element.Width = Math.Max(0, width); element.Height = Math.Max(0, height);
     }
 
-    private FrameworkElement? CreateDrawingElement(AnnotationTool tool, Point point)
+    private Shape CreateDrawingElement(AnnotationTool tool, Point point)
     {
-        var color = _drawingColor;
+        if (IsFilterTool(tool) && EllipseFilter.IsChecked == true)
+            return new Ellipse { Stroke = new SolidColorBrush(_drawingColor), StrokeDashArray = [3, 2], StrokeThickness = _drawingWidth };
+        return CreateDrawingElement(tool, point, _drawingColor, _drawingWidth, _drawingOpacity, DashedStroke.IsChecked == true);
+    }
+
+    private static Shape CreateDrawingElement(AnnotationTool tool, Point point, Color color, double width, double opacity, bool dashed)
+    {
         Shape shape = tool switch
         {
             AnnotationTool.Rectangle => new Rectangle(),
@@ -525,12 +628,12 @@ public sealed partial class CaptureOverlayWindow : Window
             AnnotationTool.FilledEllipse => new Ellipse(),
             AnnotationTool.Line or AnnotationTool.Highlighter => new Line(),
             AnnotationTool.Arrow or AnnotationTool.OutlineArrow or AnnotationTool.FilledArrow or AnnotationTool.DoubleArrow => new System.Windows.Shapes.Path(),
-            AnnotationTool.Pen => new Polyline(),
+            AnnotationTool.Pen or AnnotationTool.LineStrip => new Polyline(),
             AnnotationTool.HighlighterRectangle => new Rectangle(),
             AnnotationTool.HighlighterEllipse => new Ellipse(),
             AnnotationTool.Eraser => new Ellipse { StrokeDashArray = [3, 2] },
-            AnnotationTool.Mosaic or AnnotationTool.Blur or AnnotationTool.Magnify => EllipseFilter.IsChecked == true
-                ? new Ellipse { StrokeDashArray = [3, 2] } : new Rectangle { StrokeDashArray = [3, 2] },
+            AnnotationTool.Magnify => new Ellipse { StrokeDashArray = [3, 2] },
+            AnnotationTool.Mosaic or AnnotationTool.Blur => new Rectangle { StrokeDashArray = [3, 2] },
             _ => new Rectangle()
         };
         shape.Stroke = new SolidColorBrush(color);
@@ -541,42 +644,32 @@ public sealed partial class CaptureOverlayWindow : Window
             shape.Stroke = null;
             shape.Fill = new SolidColorBrush(color);
         }
-        else if (tool == AnnotationTool.FilledArrow)
-        {
-            shape.Fill = new SolidColorBrush(color);
-            shape.StrokeThickness = 0.5;
-        }
-        else if (tool == AnnotationTool.OutlineArrow)
-        {
-            shape.Fill = Brushes.Transparent;
-            shape.StrokeThickness = Math.Max(1, _drawingWidth / 2);
-        }
-        else
-        {
-            shape.StrokeThickness = tool == AnnotationTool.Highlighter ? Math.Max(10, _drawingWidth * 3) : _drawingWidth;
-        }
+        else if (tool == AnnotationTool.FilledArrow) shape.Fill = new SolidColorBrush(color);
+        else if (tool == AnnotationTool.OutlineArrow) shape.Fill = Brushes.Transparent;
+        shape.StrokeThickness = StrokeWidth(tool, width);
         shape.StrokeStartLineCap = shape.StrokeEndLineCap = PenLineCap.Round;
         shape.StrokeLineJoin = PenLineJoin.Round;
-        if (DashedStroke.IsChecked == true && (IsShapeTool(tool) || IsLineTool(tool) || tool == AnnotationTool.Pen))
+        if (dashed && (IsShapeTool(tool) || IsLineTool(tool) || tool == AnnotationTool.Pen))
             shape.StrokeDashArray = [3, 2];
-        shape.Opacity = IsHighlighterTool(tool) ? Math.Min(0.45, _drawingOpacity) : _drawingOpacity;
+        if (tool is AnnotationTool.LineStrip or AnnotationTool.Highlighter) shape.Tag = tool;
+        shape.Opacity = IsHighlighterTool(tool) ? Math.Min(0.45, opacity) : opacity;
         if (shape is Polyline poly) poly.Points.Add(point);
         Canvas.SetLeft(shape, point.X);
         Canvas.SetTop(shape, point.Y);
         return shape;
     }
 
-    private void UpdateDrawingElement(FrameworkElement? element, Point start, Point end)
+    private void UpdateDrawingElement(FrameworkElement? element, Point start, Point end, AnnotationTool tool, double width)
     {
         if (element is Line line)
         {
             Canvas.SetLeft(line, 0); Canvas.SetTop(line, 0);
             line.X1 = start.X; line.Y1 = start.Y; line.X2 = end.X; line.Y2 = end.Y;
         }
-        else if (element is System.Windows.Shapes.Path arrow && IsArrowTool(_tool))
+        else if (element is System.Windows.Shapes.Path arrow && IsArrowTool(tool))
         {
             Canvas.SetLeft(arrow, 0); Canvas.SetTop(arrow, 0);
-            arrow.Data = CreateArrowGeometry(start, end, _tool, _drawingWidth);
+            SetArrowGeometry(arrow, new ArrowEndpoints(tool, start, end, width));
         }
         else if (element is Polyline freehand)
         {
@@ -646,28 +739,75 @@ public sealed partial class CaptureOverlayWindow : Window
         if (region.IsEmpty)
             region = new PixelRect(Math.Clamp((int)_start.X, _selection.Left, _selection.Right - 1),
                 Math.Clamp((int)_start.Y, _selection.Top, _selection.Bottom - 1), 1, 1);
-        var sample = tool == AnnotationTool.Magnify
-            ? new PixelRect(region.X + region.Width / 4, region.Y + region.Height / 4, Math.Max(1, region.Width / 2), Math.Max(1, region.Height / 2))
-            : region;
+        var image = new Image { Stretch = Stretch.Fill, Tag = new FilterSettings(tool, _filterStrength, EllipseFilter.IsChecked == true) };
+        SetRect(image, region.X, region.Y, region.Width, region.Height);
+        return image;
+    }
+
+    private void RefreshAnnotationFilters()
+    {
+        if (_selection.IsEmpty || !_annotations.Any(element => element is Image { Tag: FilterSettings })) return;
+
+        // Sample each filter against the layers below it, including already refreshed filters.
+        var layers = AnnotationCanvas.Children.OfType<FrameworkElement>()
+            .Where(element => element.Visibility == Visibility.Visible).ToArray();
+        var firstFilter = Array.FindIndex(layers, element => element is Image { Tag: FilterSettings });
+        if (firstFilter < 0) return;
+        try
+        {
+            for (var i = firstFilter; i < layers.Length; i++) layers[i].Visibility = Visibility.Hidden;
+            for (var i = firstFilter; i < layers.Length; i++)
+            {
+                var layer = layers[i];
+                if (layer is Image { Tag: FilterSettings filter } image) UpdateFilteredImage(image, filter);
+                layer.Visibility = Visibility.Visible;
+            }
+        }
+        finally
+        {
+            for (var i = firstFilter; i < layers.Length; i++) layers[i].Visibility = Visibility.Visible;
+        }
+    }
+
+    private void UpdateFilteredImage(Image image, FilterSettings filter)
+    {
+        var region = new PixelRect((int)Math.Round(GetLeft(image)), (int)Math.Round(GetTop(image)),
+            (int)image.Width, (int)image.Height);
+        var visible = region.ClampTo(_selection);
+        var bounds = new Rect(0, 0, image.Width, image.Height);
+        image.Clip = filter.Elliptical || filter.Tool == AnnotationTool.Magnify ? new EllipseGeometry(bounds) : null;
+        if (visible.IsEmpty) { image.Source = null; return; }
+
+        var sample = filter.Tool == AnnotationTool.Magnify
+            ? new PixelRect(visible.X + visible.Width / 4, visible.Y + visible.Height / 4,
+                Math.Max(1, visible.Width / 2), Math.Max(1, visible.Height / 2))
+            : visible;
         var original = RenderSelection();
-        var source = original;
         var factorX = original.PixelWidth / (double)_selection.Width;
         var factorY = original.PixelHeight / (double)_selection.Height;
         var left = Math.Clamp((int)((sample.X - _selection.X) * factorX), 0, original.PixelWidth - 1);
         var top = Math.Clamp((int)((sample.Y - _selection.Y) * factorY), 0, original.PixelHeight - 1);
-        var sampleWidth = Math.Clamp((int)Math.Round(sample.Width * factorX), 1, original.PixelWidth - left);
-        var sampleHeight = Math.Clamp((int)Math.Round(sample.Height * factorY), 1, original.PixelHeight - top);
-        var stride = sampleWidth * 4;
-        var pixels = new byte[stride * sampleHeight];
-        source.CopyPixels(new Int32Rect(left, top, sampleWidth, sampleHeight), pixels, stride, 0);
-        if (tool == AnnotationTool.Blur) ApplyGaussianBlur(pixels, sampleWidth, sampleHeight, stride, Math.Max(1, _filterStrength / 2));
-        else if (tool == AnnotationTool.Mosaic) ApplyMosaic(pixels, sampleWidth, sampleHeight, stride, _filterStrength);
-        var bitmap = BitmapSource.Create(sampleWidth, sampleHeight, 96, 96, PixelFormats.Pbgra32, null, pixels, stride);
-        var image = new Image { Source = bitmap, Width = region.Width, Height = region.Height, Stretch = Stretch.Fill };
-        if (EllipseFilter.IsChecked == true || tool == AnnotationTool.Magnify)
-            image.Clip = new EllipseGeometry(new Rect(0, 0, region.Width, region.Height));
-        Canvas.SetLeft(image, region.X); Canvas.SetTop(image, region.Y);
-        return image;
+        var width = Math.Clamp((int)Math.Round(sample.Width * factorX), 1, original.PixelWidth - left);
+        var height = Math.Clamp((int)Math.Round(sample.Height * factorY), 1, original.PixelHeight - top);
+        var stride = width * 4;
+        var pixels = new byte[stride * height];
+        original.CopyPixels(new Int32Rect(left, top, width, height), pixels, stride, 0);
+        if (filter.Tool == AnnotationTool.Blur) ApplyGaussianBlur(pixels, width, height, stride, Math.Max(1, filter.Strength / 2));
+        else if (filter.Tool == AnnotationTool.Mosaic) ApplyMosaic(pixels, width, height, stride, filter.Strength);
+        var bitmap = BitmapSource.Create(width, height, 96, 96, PixelFormats.Pbgra32, null, pixels, stride);
+        bitmap.Freeze();
+        if (visible == region) image.Source = bitmap;
+        else
+        {
+            var group = new DrawingGroup();
+            using (var drawing = group.Open())
+            {
+                drawing.DrawRectangle(Brushes.Transparent, null, bounds);
+                drawing.DrawImage(bitmap, new Rect(visible.X - region.X, visible.Y - region.Y, visible.Width, visible.Height));
+            }
+            group.Freeze();
+            image.Source = new DrawingImage(group);
+        }
     }
 
     private static void ApplyMosaic(byte[] pixels, int width, int height, int stride, int block)
@@ -686,47 +826,11 @@ public sealed partial class CaptureOverlayWindow : Window
         }
     }
 
-    private void BeginText(Point point)
-    {
-        var fontFamily = FontFamilyPicker.SelectedItem as FontFamily ?? new FontFamily("Microsoft JhengHei UI");
-        var fontSize = SelectedFontSize();
-        var editor = new TextBox
-        {
-            MinWidth = 120, FontFamily = fontFamily, FontSize = fontSize,
-            FontWeight = BoldToggle.IsChecked == true ? FontWeights.Bold : FontWeights.Normal,
-            FontStyle = ItalicToggle.IsChecked == true ? FontStyles.Italic : FontStyles.Normal,
-            Foreground = new SolidColorBrush(_drawingColor), Opacity = _drawingOpacity,
-            Background = new SolidColorBrush(Color.FromArgb(170, 255, 255, 255)), AcceptsReturn = true
-        };
-        Canvas.SetLeft(editor, point.X); Canvas.SetTop(editor, point.Y);
-        AnnotationCanvas.Children.Add(editor);
-        editor.Focus();
-        editor.LostKeyboardFocus += Commit;
-        editor.KeyDown += (_, e) => { if (e.Key == Key.Enter && (Keyboard.Modifiers & ModifierKeys.Shift) == 0) { e.Handled = true; Commit(editor, e); } };
-
-        void Commit(object? sender, RoutedEventArgs args)
-        {
-            if (!AnnotationCanvas.Children.Contains(editor)) return;
-            AnnotationCanvas.Children.Remove(editor);
-            if (string.IsNullOrWhiteSpace(editor.Text)) return;
-            var text = new OutlinedAnnotationText
-            {
-                Text = editor.Text, FontFamily = editor.FontFamily, FontSize = editor.FontSize,
-                FontWeight = editor.FontWeight, FontStyle = editor.FontStyle,
-                Foreground = editor.Foreground, Opacity = editor.Opacity,
-                Background = TextBackground.IsChecked == true ? Brushes.White : Brushes.Transparent,
-                Outline = new SolidColorBrush(_outlineColor), OutlineWidth = _outlineWidth
-            };
-            Canvas.SetLeft(text, point.X); Canvas.SetTop(text, point.Y);
-            AddAnnotationCommand(text);
-        }
-    }
-
     private void AddAnnotationCommand(FrameworkElement element)
     {
         if (AnnotationCanvas.Children.Contains(element)) AnnotationCanvas.Children.Remove(element);
         AddAnnotations([element]);
-        if (_preferences.SelectNewAnnotation) SelectAnnotations([element]);
+        if (IsResizableShape(element) || _preferences.SelectNewAnnotation) SelectAnnotations([element]);
     }
 
     private void AddAnnotations(FrameworkElement[] elements)
@@ -752,26 +856,8 @@ public sealed partial class CaptureOverlayWindow : Window
     {
         var index = _annotations.IndexOf(element);
         var childIndex = AnnotationCanvas.Children.IndexOf(element);
-        _undo.Execute(new DelegateCommand(
-            () => { AnnotationCanvas.Children.Remove(element); _annotations.Remove(element); },
-            () => { AnnotationCanvas.Children.Insert(childIndex, element); _annotations.Insert(index, element); }));
-        UpdateHistoryButtons();
-    }
-
-    private FrameworkElement? FindAnnotationAt(Point point)
-    {
-        foreach (var element in _annotations.AsEnumerable().Reverse())
-        {
-            if (!element.IsVisible) continue;
-            try
-            {
-                var bounds = element.TransformToAncestor(AnnotationCanvas).TransformBounds(VisualTreeHelper.GetDescendantBounds(element));
-                bounds.Inflate(Math.Max(5, _drawingWidth), Math.Max(5, _drawingWidth));
-                if (bounds.Contains(point)) return element;
-            }
-            catch (InvalidOperationException) { }
-        }
-        return null;
+        Edit(() => { AnnotationCanvas.Children.Remove(element); _annotations.Remove(element); },
+            () => { AnnotationCanvas.Children.Insert(childIndex, element); _annotations.Insert(index, element); });
     }
 
     private BitmapSource RenderSelection()
@@ -837,6 +923,7 @@ public sealed partial class CaptureOverlayWindow : Window
 
     private void Save()
     {
+        FinishTextEditor();
         try
         {
             Directory.CreateDirectory(_outputDirectory);
@@ -916,6 +1003,7 @@ public sealed partial class CaptureOverlayWindow : Window
         if (_editingSticker && !_stickerEditSelection.IsEmpty) return;
         ReplayedScreenshot.Source = null;
         _selection = selection.ClampTo(CanvasBounds);
+        RefreshAnnotationFilters();
         _hoverCandidate = null;
         _isSelectionCommitted = !_selection.IsEmpty;
         Magnifier.Visibility = Visibility.Collapsed;
@@ -934,6 +1022,25 @@ public sealed partial class CaptureOverlayWindow : Window
 
     private void Window_KeyDown(object sender, KeyEventArgs e)
     {
+        if (_dragMode == DragMode.MoveInlineText)
+        {
+            if (e.Key == Key.Escape) EndInlineTextMove(_start, cancel: true);
+            e.Handled = true;
+            return;
+        }
+        if (_textEditor?.IsKeyboardFocusWithin == true) return;
+        if (_dragMode == DragMode.DrawText && e.Key == Key.Escape)
+        {
+            InputCanvas.ReleaseMouseCapture();
+            e.Handled = true;
+            return;
+        }
+        if (_dragMode == DragMode.ResizeAnnotation)
+        {
+            if (e.Key == Key.Escape) CancelAnnotationResize();
+            e.Handled = true;
+            return;
+        }
         if (HandleCaptureShortcut(e)) { e.Handled = true; return; }
         if (e.Key is Key.LeftShift or Key.RightShift)
         {
@@ -973,6 +1080,10 @@ public sealed partial class CaptureOverlayWindow : Window
     {
         if (sender is not ToggleButton { Tag: string tag } || !Enum.TryParse<AnnotationTool>(tag, out var tool)) return;
 
+        if (!ReferenceEquals(sender, ShapeToolButton) && !ReferenceEquals(sender, LineToolButton) &&
+            !ReferenceEquals(sender, HighlighterToolButton) && !ReferenceEquals(sender, FilterToolButton) &&
+            !ReferenceEquals(sender, PenToolButton) && !ReferenceEquals(sender, TextToolButton) &&
+            !ReferenceEquals(sender, EraserToolButton) && TryChangeAnnotationTool(tool)) return;
         if (ReferenceEquals(sender, ShapeToolButton)) tool = _lastShapeTool;
         else if (ReferenceEquals(sender, LineToolButton)) tool = _lastLineTool;
         else if (ReferenceEquals(sender, HighlighterToolButton)) tool = _lastHighlighterTool;
@@ -983,7 +1094,9 @@ public sealed partial class CaptureOverlayWindow : Window
 
     private void SetTool(AnnotationTool tool)
     {
+        FinishTextEditor();
         if (_tool != tool) FinishLineStrip();
+        SelectAnnotations([]);
         _tool = tool;
         RestoreToolColor();
         if (IsShapeTool(tool))
@@ -991,15 +1104,17 @@ public sealed partial class CaptureOverlayWindow : Window
         if (IsLineTool(tool)) _lastLineTool = tool;
         if (IsHighlighterTool(tool)) _lastHighlighterTool = tool;
         if (IsFilterTool(tool)) _lastFilterTool = tool;
-        Cursor = tool == AnnotationTool.Select ? Cursors.Arrow : Cursors.Cross;
+        UpdateAnnotationOutlines();
+        UpdatePointerCursor(_currentPoint);
         UpdateToolUi();
     }
 
     private void ShapeFill_Click(object sender, RoutedEventArgs e)
     {
         var filled = ReferenceEquals(sender, FilledShapeOption);
-        var ellipse = _lastShapeTool is AnnotationTool.Ellipse or AnnotationTool.FilledEllipse;
-        SetTool((ellipse, filled) switch
+        var shape = IsShapeTool(ContextTool) ? ContextTool : _lastShapeTool;
+        var ellipse = shape is AnnotationTool.Ellipse or AnnotationTool.FilledEllipse;
+        SetShapeTool((ellipse, filled) switch
         {
             (true, true) => AnnotationTool.FilledEllipse,
             (true, false) => AnnotationTool.Ellipse,
@@ -1011,8 +1126,9 @@ public sealed partial class CaptureOverlayWindow : Window
     private void ShapeGeometry_Click(object sender, RoutedEventArgs e)
     {
         var ellipse = ReferenceEquals(sender, EllipseOption);
-        var filled = _lastShapeTool is AnnotationTool.FilledRectangle or AnnotationTool.FilledEllipse;
-        SetTool((ellipse, filled) switch
+        var shape = IsShapeTool(ContextTool) ? ContextTool : _lastShapeTool;
+        var filled = shape is AnnotationTool.FilledRectangle or AnnotationTool.FilledEllipse;
+        SetShapeTool((ellipse, filled) switch
         {
             (true, true) => AnnotationTool.FilledEllipse,
             (true, false) => AnnotationTool.Ellipse,
@@ -1021,16 +1137,31 @@ public sealed partial class CaptureOverlayWindow : Window
         });
     }
 
+    private void SetShapeTool(AnnotationTool tool)
+    {
+        if (!TryChangeAnnotationTool(tool)) SetTool(tool);
+    }
+
     private void Style_Changed(object sender, RoutedEventArgs e)
     {
         if (!IsInitialized || _updatingStyleControls) return;
+        if (_textEditor is not null && _textBeingEdited is not null)
+        {
+            UpdateInlineTextStyle();
+            return;
+        }
+        if (SelectedAnnotation() is { } element)
+        {
+            ChangeAnnotationStyle(element, sender);
+            return;
+        }
         _drawingWidth = WidthSlider.Value;
         _drawingOpacity = OpacitySlider.Value;
         _filterStrength = (int)Math.Round(FilterStrengthSlider.Value);
         UpdateStyleLabels();
     }
 
-    private void TextStyle_Click(object sender, RoutedEventArgs e) => UpdateToolUi();
+    private void TextStyle_Click(object sender, RoutedEventArgs e) => Style_Changed(sender, e);
 
     private void ColorSwatch_Click(object sender, RoutedEventArgs e)
     {
@@ -1044,7 +1175,7 @@ public sealed partial class CaptureOverlayWindow : Window
         {
             AllowFullOpen = true,
             FullOpen = true,
-            Color = System.Drawing.Color.FromArgb(_drawingColor.R, _drawingColor.G, _drawingColor.B)
+            Color = System.Drawing.Color.FromArgb(ContextColor.R, ContextColor.G, ContextColor.B)
         };
         var owner = new NativeWindowOwner(new WindowInteropHelper(this).Handle);
         if (dialog.ShowDialog(owner) != System.Windows.Forms.DialogResult.OK) return;
@@ -1068,43 +1199,44 @@ public sealed partial class CaptureOverlayWindow : Window
 
     private void UpdateToolUi()
     {
-        ShapeToolButton.IsChecked = IsShapeTool(_tool);
-        LineToolButton.IsChecked = IsLineTool(_tool);
-        PenToolButton.IsChecked = _tool == AnnotationTool.Pen;
-        HighlighterToolButton.IsChecked = IsHighlighterTool(_tool);
-        FilterToolButton.IsChecked = IsFilterTool(_tool);
-        TextToolButton.IsChecked = _tool == AnnotationTool.Text;
-        EraserToolButton.IsChecked = _tool == AnnotationTool.Eraser;
-        OutlineShapeOption.IsChecked = _tool is AnnotationTool.Rectangle or AnnotationTool.Ellipse;
-        FilledShapeOption.IsChecked = _tool is AnnotationTool.FilledRectangle or AnnotationTool.FilledEllipse;
-        RectangleOption.IsChecked = _tool is AnnotationTool.Rectangle or AnnotationTool.FilledRectangle;
-        EllipseOption.IsChecked = _tool is AnnotationTool.Ellipse or AnnotationTool.FilledEllipse;
-        RoundedOption.IsChecked = _tool == AnnotationTool.RoundedRectangle;
-        LineOption.IsChecked = _tool == AnnotationTool.Line;
-        ArrowOption.IsChecked = _tool == AnnotationTool.Arrow;
-        OutlineArrowOption.IsChecked = _tool == AnnotationTool.OutlineArrow;
-        FilledArrowOption.IsChecked = _tool == AnnotationTool.FilledArrow;
-        DoubleArrowOption.IsChecked = _tool == AnnotationTool.DoubleArrow;
-        LineStripOption.IsChecked = _tool == AnnotationTool.LineStrip;
-        HighlighterLineOption.IsChecked = _tool == AnnotationTool.Highlighter;
-        HighlighterRectangleOption.IsChecked = _tool == AnnotationTool.HighlighterRectangle;
-        HighlighterEllipseOption.IsChecked = _tool == AnnotationTool.HighlighterEllipse;
-        MosaicOption.IsChecked = _tool == AnnotationTool.Mosaic;
-        BlurOption.IsChecked = _tool == AnnotationTool.Blur;
-        MagnifyOption.IsChecked = _tool == AnnotationTool.Magnify;
+        var tool = ContextTool;
+        ShapeToolButton.IsChecked = IsShapeTool(tool);
+        LineToolButton.IsChecked = IsLineTool(tool);
+        PenToolButton.IsChecked = tool == AnnotationTool.Pen;
+        HighlighterToolButton.IsChecked = IsHighlighterTool(tool);
+        FilterToolButton.IsChecked = IsFilterTool(tool);
+        TextToolButton.IsChecked = tool == AnnotationTool.Text;
+        EraserToolButton.IsChecked = tool == AnnotationTool.Eraser;
+        OutlineShapeOption.IsChecked = tool is AnnotationTool.Rectangle or AnnotationTool.Ellipse;
+        FilledShapeOption.IsChecked = tool is AnnotationTool.FilledRectangle or AnnotationTool.FilledEllipse;
+        RectangleOption.IsChecked = tool is AnnotationTool.Rectangle or AnnotationTool.FilledRectangle;
+        EllipseOption.IsChecked = tool is AnnotationTool.Ellipse or AnnotationTool.FilledEllipse;
+        RoundedOption.IsChecked = tool == AnnotationTool.RoundedRectangle;
+        LineOption.IsChecked = tool == AnnotationTool.Line;
+        ArrowOption.IsChecked = tool == AnnotationTool.Arrow;
+        OutlineArrowOption.IsChecked = tool == AnnotationTool.OutlineArrow;
+        FilledArrowOption.IsChecked = tool == AnnotationTool.FilledArrow;
+        DoubleArrowOption.IsChecked = tool == AnnotationTool.DoubleArrow;
+        LineStripOption.IsChecked = tool == AnnotationTool.LineStrip;
+        HighlighterLineOption.IsChecked = tool == AnnotationTool.Highlighter;
+        HighlighterRectangleOption.IsChecked = tool == AnnotationTool.HighlighterRectangle;
+        HighlighterEllipseOption.IsChecked = tool == AnnotationTool.HighlighterEllipse;
+        MosaicOption.IsChecked = tool == AnnotationTool.Mosaic;
+        BlurOption.IsChecked = tool == AnnotationTool.Blur;
+        MagnifyOption.IsChecked = tool == AnnotationTool.Magnify;
 
-        ShapeOptions.Visibility = Show(IsShapeTool(_tool));
-        LineOptions.Visibility = Show(IsLineTool(_tool));
-        HighlighterOptions.Visibility = Show(IsHighlighterTool(_tool));
-        FilterOptions.Visibility = Show(IsFilterTool(_tool));
-        TextOptions.Visibility = Show(_tool == AnnotationTool.Text);
+        ShapeOptions.Visibility = Show(IsShapeTool(tool));
+        LineOptions.Visibility = Show(IsLineTool(tool));
+        HighlighterOptions.Visibility = Show(IsHighlighterTool(tool));
+        FilterOptions.Visibility = Show(IsFilterTool(tool));
+        TextOptions.Visibility = Show(tool == AnnotationTool.Text);
 
-        var supportsStroke = IsShapeTool(_tool) || IsLineTool(_tool) || _tool == AnnotationTool.Pen || IsHighlighterTool(_tool);
-        var supportsColor = supportsStroke || _tool is AnnotationTool.Text or AnnotationTool.Number;
+        var supportsStroke = IsShapeTool(tool) || IsLineTool(tool) || tool == AnnotationTool.Pen || IsHighlighterTool(tool);
+        var supportsColor = supportsStroke || tool is AnnotationTool.Text or AnnotationTool.Number;
         StrokeOptions.Visibility = Show(supportsStroke);
         ColorOptions.Visibility = Show(supportsColor);
         OpacityOptions.Visibility = Show(supportsColor);
-        ContextToolbar.Visibility = Show(supportsColor || IsFilterTool(_tool));
+        ContextToolbar.Visibility = Show(supportsColor || IsFilterTool(tool));
         UpdateColorPreview();
 
         static Visibility Show(bool visible) => visible ? Visibility.Visible : Visibility.Collapsed;
@@ -1124,19 +1256,20 @@ public sealed partial class CaptureOverlayWindow : Window
 
     private void UpdateStyleLabels()
     {
-        WidthValue.Text = $"{Math.Round(_drawingWidth):0}";
-        OpacityValue.Text = $"{Math.Round(_drawingOpacity * 100):0}%";
-        FilterStrengthValue.Text = _filterStrength.ToString();
+        WidthValue.Text = $"{Math.Round(WidthSlider.Value):0}";
+        OpacityValue.Text = $"{Math.Round(OpacitySlider.Value * 100):0}%";
+        FilterStrengthValue.Text = Math.Round(FilterStrengthSlider.Value).ToString();
     }
 
     private void UpdateColorPreview()
     {
         if (CurrentColorPreview is null) return;
-        CurrentColorPreview.Background = new SolidColorBrush(_drawingColor);
+        var activeColor = ContextColor;
+        CurrentColorPreview.Background = new SolidColorBrush(activeColor);
         foreach (var button in ColorPalette.Children.OfType<Button>())
         {
             var selected = button.Tag is string color &&
-                string.Equals(color, _drawingColor.ToString(), StringComparison.OrdinalIgnoreCase);
+                string.Equals(color, activeColor.ToString(), StringComparison.OrdinalIgnoreCase);
             button.BorderBrush = selected ? new SolidColorBrush(Color.FromRgb(0, 122, 255)) :
                 new SolidColorBrush(Color.FromRgb(119, 119, 119));
             button.BorderThickness = selected ? new Thickness(2) : new Thickness(1);
@@ -1154,8 +1287,8 @@ public sealed partial class CaptureOverlayWindow : Window
         RedoButton.IsEnabled = _undo.CanRedo;
     }
 
-    private void Undo_Click(object sender, RoutedEventArgs e) { _undo.Undo(); UpdateHistoryButtons(); UpdateAnnotationOutlines(); }
-    private void Redo_Click(object sender, RoutedEventArgs e) { _undo.Redo(); UpdateHistoryButtons(); UpdateAnnotationOutlines(); }
+    private void Undo_Click(object sender, RoutedEventArgs e) { FinishTextEditor(); _undo.Undo(); RefreshAnnotationEdits(); }
+    private void Redo_Click(object sender, RoutedEventArgs e) { FinishTextEditor(); _undo.Redo(); RefreshAnnotationEdits(); }
     private void Copy_Click(object sender, RoutedEventArgs e) => CopyAndClose();
     private void Save_Click(object sender, RoutedEventArgs e) => Save();
     private void Sticker_Click(object sender, RoutedEventArgs e) => PinAndClose();
@@ -1170,7 +1303,10 @@ public sealed partial class CaptureOverlayWindow : Window
     private Point PointerPosition(MouseEventArgs e) => NativeMethods.GetCursorPos(out var cursor)
         ? ClampPoint(new Point(cursor.X - _frame.Bounds.X, cursor.Y - _frame.Bounds.Y))
         : ClampPoint(e.GetPosition(InputCanvas));
-    private Point ClampToSelectionIfDrawing(Point point) => _dragMode == DragMode.Draw
+    private static bool CanDrawOutsideSelection(AnnotationTool tool) =>
+        IsShapeTool(tool) || tool is AnnotationTool.Text or AnnotationTool.HighlighterRectangle or AnnotationTool.HighlighterEllipse;
+
+    private Point ClampToSelectionIfDrawing(Point point) => _dragMode == DragMode.Draw && !CanDrawOutsideSelection(_tool)
         ? new Point(Math.Clamp(point.X, _selection.Left, _selection.Right), Math.Clamp(point.Y, _selection.Top, _selection.Bottom)) : point;
     private static PixelPoint ToPixel(Point point) => new((int)Math.Round(point.X), (int)Math.Round(point.Y));
     private PixelPoint ToGlobal(PixelPoint local) => new(local.X + _frame.Bounds.X, local.Y + _frame.Bounds.Y);

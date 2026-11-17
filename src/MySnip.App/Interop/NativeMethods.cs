@@ -42,6 +42,17 @@ internal static partial class NativeMethods
     [LibraryImport("user32.dll")]
     internal static partial int GetSystemMetrics(int nIndex);
 
+    [LibraryImport("user32.dll", SetLastError = true)]
+    internal static partial nint GetDC(nint window);
+
+    [LibraryImport("user32.dll")]
+    internal static partial int ReleaseDC(nint window, nint dc);
+
+    [LibraryImport("gdi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool BitBlt(nint destination, int x, int y, int width, int height,
+        nint source, int sourceX, int sourceY, uint operation);
+
     [LibraryImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool GetCursorPos(out Point point);

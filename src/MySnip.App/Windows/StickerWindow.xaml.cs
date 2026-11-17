@@ -34,6 +34,8 @@ public sealed partial class StickerWindow : Window
     private double _speed = 1;
     private int _frameIndex;
     private Point? _cropStart;
+    private Point? _dragStart;
+    private bool _nativeSizeUpdatePending;
     private WindowsShare? _share;
 
     internal StickerWindow(StickerContent content, StickerManager manager, StickerLayout? layout = null)
@@ -58,10 +60,16 @@ public sealed partial class StickerWindow : Window
         _position = layout?.Position ?? new PixelPoint(cursor.X + 12, cursor.Y + 12);
         ShowActivated = false;
         _animation.Tick += (_, _) => AdvanceFrame(1);
-        SourceInitialized += (_, _) => ApplyClickThrough();
-        MouseLeftButtonDown += OnStickerMouseDown;
-        MouseWheel += OnStickerMouseWheel;
-        PreviewMouseRightButtonDown += (_, e) =>
+        SourceInitialized += (_, _) =>
+        {
+            SetImageSize(VisualTreeHelper.GetDpi(this));
+            ApplyClickThrough();
+        };
+        DpiChanged += (_, e) => SetImageSize(e.NewDpi);
+        Frame.MouseLeftButtonDown += OnStickerMouseDown;
+        MouseLeftButtonUp += (_, _) => CancelPendingDrag();
+        Frame.MouseWheel += OnStickerMouseWheel;
+        Frame.PreviewMouseRightButtonDown += (_, e) =>
         {
             if (_content.Frames.Length == 1)
             {
@@ -69,9 +77,9 @@ public sealed partial class StickerWindow : Window
                 Mouse.Capture(Frame);
             }
         };
-        PreviewMouseRightButtonUp += OnStickerRightButtonUp;
-        LostMouseCapture += (_, _) => _cropStart = null;
-        MouseMove += (_, e) => UpdateColorSample(e.GetPosition(StickerImage));
+        Frame.PreviewMouseRightButtonUp += OnStickerRightButtonUp;
+        LostMouseCapture += (_, _) => { _cropStart = null; _dragStart = null; };
+        MouseMove += OnStickerMouseMove;
         MouseLeave += (_, _) => ColorSample.Visibility = Visibility.Collapsed;
         LocationChanged += (_, _) =>
         {
@@ -80,7 +88,11 @@ public sealed partial class StickerWindow : Window
             _manager.Changed();
         };
         ContextMenu = new ContextMenu();
-        ContextMenuOpening += (_, _) => PopulateContextMenu();
+        ContextMenuOpening += (_, e) =>
+        {
+            if (e.CursorLeft >= 0 && !Frame.IsMouseOver) { e.Handled = true; return; }
+            PopulateContextMenu();
+        };
         AllowDrop = true;
         Drop += (_, e) => _manager.Drop?.Invoke(this, e.Data);
         Closed += (_, _) => { _animation.Stop(); _share?.Dispose(); _manager.Remove(this); };
@@ -92,8 +104,12 @@ public sealed partial class StickerWindow : Window
     internal Guid? DesktopId { get; set; }
     internal nint WindowHandle => new WindowInteropHelper(this).Handle;
     internal bool IsClickThrough => _clickThrough;
-    internal bool ContainsScreenPoint(int x, int y) => WindowHandle != 0 && NativeMethods.GetWindowRect(WindowHandle, out var rect)
-        && x >= rect.Left && x < rect.Right && y >= rect.Top && y < rect.Bottom;
+    internal bool ContainsScreenPoint(int x, int y)
+    {
+        if (WindowHandle == 0 || !IsVisible) return false;
+        return new Rect(Frame.PointToScreen(new Point()), Frame.PointToScreen(new Point(Frame.ActualWidth, Frame.ActualHeight)))
+            .Contains(x, y);
+    }
     internal bool UserHidden { get; set; }
     internal StickerContent ImageContent => _content;
     internal StickerLayout Snapshot() => new(_id, Group, _position, _state,
@@ -145,7 +161,15 @@ public sealed partial class StickerWindow : Window
     private PixelPoint GetPosition()
     {
         var handle = new WindowInteropHelper(this).Handle;
-        return handle != 0 && NativeMethods.GetWindowRect(handle, out var rect) ? new PixelPoint(rect.Left, rect.Top) : _position;
+        var inset = GlowInset();
+        return handle != 0 && NativeMethods.GetWindowRect(handle, out var rect)
+            ? new PixelPoint(rect.Left + inset.X, rect.Top + inset.Y) : _position;
+    }
+
+    private PixelPoint GlowInset()
+    {
+        var dpi = VisualTreeHelper.GetDpi(this);
+        return new PixelPoint((int)Math.Round(8 * dpi.DpiScaleX), (int)Math.Round(8 * dpi.DpiScaleY));
     }
 
     private void MoveTo(PixelPoint location)
@@ -155,7 +179,8 @@ public sealed partial class StickerWindow : Window
         var x = Math.Clamp(location.X, work.Left, Math.Max(work.Left, work.Right - 40));
         var y = Math.Clamp(location.Y, work.Top, Math.Max(work.Top, work.Bottom - 40));
         var handle = new WindowInteropHelper(this).Handle;
-        if (handle != 0 && NativeMethods.SetWindowPos(handle, 0, x, y, 0, 0,
+        var inset = GlowInset();
+        if (handle != 0 && NativeMethods.SetWindowPos(handle, 0, x - inset.X, y - inset.Y, 0, 0,
                 NativeMethods.SwpNoSize | NativeMethods.SwpNoZOrder | NativeMethods.SwpNoActivate))
             _position = GetPosition();
     }
@@ -171,6 +196,30 @@ public sealed partial class StickerWindow : Window
             return;
         }
         Activate();
+        if (CaptureMouse()) _dragStart = e.GetPosition(this);
+    }
+
+    private void CancelPendingDrag()
+    {
+        if (!_dragStart.HasValue) return;
+        _dragStart = null;
+        if (IsMouseCaptured) ReleaseMouseCapture();
+    }
+
+    private void OnStickerMouseMove(object sender, MouseEventArgs e)
+    {
+        UpdateColorSample(e.GetPosition(StickerImage));
+        if (_dragStart is not { } start) return;
+        if (_clickThrough || e.LeftButton != MouseButtonState.Pressed)
+        {
+            CancelPendingDrag();
+            return;
+        }
+        var offset = e.GetPosition(this) - start;
+        if (Math.Abs(offset.X) < SystemParameters.MinimumHorizontalDragDistance &&
+            Math.Abs(offset.Y) < SystemParameters.MinimumVerticalDragDistance) return;
+
+        CancelPendingDrag();
         var original = GetPosition();
         DragMove();
         var moved = GetPosition();
@@ -252,8 +301,8 @@ public sealed partial class StickerWindow : Window
                 else if (action == StickerEscapeAction.DisableClickThrough) _manager.DisableAllClickThrough();
                 break;
             case Key.Delete: CloseSelected(); break;
-            case Key.D1: RotateOrStep(-1); break;
-            case Key.D2: RotateOrStep(1); break;
+            case Key.D1 when _content.Frames.Length > 1: StepAnimation(-1); break;
+            case Key.D2 when _content.Frames.Length > 1: StepAnimation(1); break;
             case Key.D3: Flip(true); break;
             case Key.D4: Flip(false); break;
             case Key.D5: Filter(true); break;
@@ -277,15 +326,15 @@ public sealed partial class StickerWindow : Window
         if (!Keyboard.Modifiers.HasFlag(ModifierKeys.Alt)) ColorSample.Visibility = Visibility.Collapsed;
     }
 
-    private void RotateOrStep(int direction)
+    private void StepAnimation(int direction)
     {
-        if (_content.Frames.Length > 1)
-        {
-            _playing = false;
-            AdvanceFrame(direction);
-        }
-        else Change(window => window._state = window._state with { RotationDegrees = (window._state.RotationDegrees + 360 + direction * 90) % 360 });
+        _playing = false;
+        AdvanceFrame(direction);
     }
+
+    private void Rotate(int direction) =>
+        Change(window => window._state = window._state with
+            { RotationDegrees = (window._state.RotationDegrees + 360 + direction * 90) % 360 });
 
     private void Flip(bool horizontal) => Change(window => window._state = horizontal
         ? window._state with { FlipHorizontal = !window._state.FlipHorizontal }
@@ -335,14 +384,13 @@ public sealed partial class StickerWindow : Window
             _displayed.Freeze();
         }
         StickerImage.Source = _displayed;
+        SetImageSize(VisualTreeHelper.GetDpi(this));
     }
 
     private void ApplyState()
     {
         Opacity = _state.Opacity;
-        var width = _thumbnail ? Math.Min(_displayed.PixelWidth, _thumbnailWidth) : Math.Min(_displayed.PixelWidth, 640) * _state.Scale;
-        StickerImage.Width = width;
-        StickerImage.Height = width * _displayed.PixelHeight / _displayed.PixelWidth;
+        SetImageSize(VisualTreeHelper.GetDpi(this));
         StickerImage.LayoutTransform = TransformImage();
         Frame.Background = _background switch
         {
@@ -353,6 +401,45 @@ public sealed partial class StickerWindow : Window
             _ => Brushes.Transparent
         };
         UpdateBorder();
+    }
+
+    private void SetImageSize(DpiScale dpi)
+    {
+        var width = _displayed.PixelWidth;
+        var height = _displayed.PixelHeight;
+        var rotated = _state.RotationDegrees is 90 or 270;
+        var scale = _thumbnail ? Math.Min(1, _thumbnailWidth / (rotated ? height : width)) : _state.Scale;
+        // A pinned capture at 100% occupies its original physical pixels on each monitor.
+        StickerImage.Width = Math.Max(1, Math.Round(width * scale)) / (rotated ? dpi.DpiScaleY : dpi.DpiScaleX);
+        StickerImage.Height = Math.Max(1, Math.Round(height * scale)) / (rotated ? dpi.DpiScaleX : dpi.DpiScaleY);
+        StickerSurface.Width = Math.Max(Frame.MinWidth, rotated ? StickerImage.Height : StickerImage.Width);
+        StickerSurface.Height = Math.Max(Frame.MinHeight, rotated ? StickerImage.Width : StickerImage.Height);
+        QueueNativeSizeUpdate();
+    }
+
+    private void QueueNativeSizeUpdate()
+    {
+        if (_nativeSizeUpdatePending || WindowHandle == 0) return;
+        _nativeSizeUpdatePending = true;
+        Dispatcher.InvokeAsync(() =>
+        {
+            _nativeSizeUpdatePending = false;
+            ResizeNativeWindow();
+        }, DispatcherPriority.Loaded);
+    }
+
+    private void ResizeNativeWindow()
+    {
+        if (WindowHandle == 0) return;
+        var dpi = VisualTreeHelper.GetDpi(this);
+        // WPF auto-sizing can cap a borderless window at one screen when the image spans screens.
+        var margin = StickerSurface.Margin;
+        var desiredWidth = (int)Math.Round((StickerSurface.Width + margin.Left + margin.Right) * dpi.DpiScaleX);
+        var desiredHeight = (int)Math.Round((StickerSurface.Height + margin.Top + margin.Bottom) * dpi.DpiScaleY);
+        if (NativeMethods.GetWindowRect(WindowHandle, out var rect) &&
+            (rect.Right - rect.Left != desiredWidth || rect.Bottom - rect.Top != desiredHeight))
+            NativeMethods.SetWindowPos(WindowHandle, 0, 0, 0, desiredWidth, desiredHeight,
+                NativeMethods.SwpNoMove | NativeMethods.SwpNoZOrder | NativeMethods.SwpNoActivate | NativeMethods.SwpNoSendChanging);
     }
 
     private TransformGroup TransformImage() => new()
@@ -384,8 +471,9 @@ public sealed partial class StickerWindow : Window
 
     private void UpdateBorder()
     {
-        Frame.BorderThickness = new Thickness(_clickThrough ? 0 : _selected ? 2 : 1);
-        Frame.BorderBrush = _selected ? Brushes.DeepSkyBlue : new SolidColorBrush(Color.FromArgb(128, 39, 167, 231));
+        GlowOutline.Visibility = _clickThrough ? Visibility.Hidden : Visibility.Visible;
+        GlowOutline.BorderBrush = new SolidColorBrush(_selected ? Color.FromRgb(46, 130, 250) : Color.FromArgb(173, 88, 155, 255));
+        StickerGlow.Opacity = _selected ? 1 : 0.85;
     }
 
     private void ToggleClickThrough()
@@ -494,8 +582,16 @@ public sealed partial class StickerWindow : Window
                 if (input is not null && StickerText.TryParseColor(input, out var parsed)) ReplaceImage(StickerText.ColorCard(parsed));
             });
         ContextMenu.Items.Add(new Separator());
-        Add(ContextMenu, "逆時針旋轉 / 上一格", () => RotateOrStep(-1), "1");
-        Add(ContextMenu, "順時針旋轉 / 下一格", () => RotateOrStep(1), "2");
+        if (_content.Frames.Length > 1)
+        {
+            Add(ContextMenu, "上一格", () => StepAnimation(-1), "1");
+            Add(ContextMenu, "下一格", () => StepAnimation(1), "2");
+        }
+        else
+        {
+            Add(ContextMenu, "逆時針旋轉 90°", () => Rotate(-1));
+            Add(ContextMenu, "順時針旋轉 90°", () => Rotate(1));
+        }
         Add(ContextMenu, "水平翻轉", () => Flip(true), "3");
         Add(ContextMenu, "垂直翻轉", () => Flip(false), "4");
         Add(ContextMenu, "灰階", () => Filter(true), "5", check: _grayscale);

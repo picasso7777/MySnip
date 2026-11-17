@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from math import atan2, degrees
 from pathlib import Path
 from types import SimpleNamespace
 import tkinter as tk
@@ -10,7 +11,8 @@ from tkinter import colorchooser, filedialog, font, messagebox, simpledialog, tt
 
 from PIL import Image, ImageEnhance, ImageTk
 
-from snip_images import Annotation, Annotations, RESAMPLE, annotation_fonts, decorate, render_annotations, save_image
+from snip_images import (Annotation, Annotations, RESAMPLE, SHAPE_TOOLS, TEXT_PADDING, annotation_fonts, decorate,
+                         image_font, render_annotations, rotate_offset, save_image, wrap_annotation_text)
 from snip_native import WindowsShare
 from snip_storage import Settings, is_hex_color, read_json, write_json
 from snip_windows import copy_text, hwnd, monitor_at, position_window, user32
@@ -26,6 +28,12 @@ TOOL_VARIANTS = {
 TOOL_GROUPS = {tool: group for group, variants in TOOL_VARIANTS.items() for tool, _, _ in variants}
 TOOLBAR_BG = "#f9f9f9"
 TOOLBAR_BORDER = "#bdbdbd"
+OUTSIDE_SELECTION_TOOLS = (*SHAPE_TOOLS, "text")
+SHAPE_HANDLES = ((-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1))
+RESIZE_CURSORS = ("size_we", "size_nw_se", "size_ns", "size_ne_sw")
+TEXT_HANDLES = ((-1, -1), (1, -1), (1, 1), (-1, 1))
+TEXT_DELETE_CORNER = (1, -1)
+TEXT_HANDLE_RADIUS = 6
 
 
 def ordered_box(first, second):
@@ -42,29 +50,6 @@ def intersection(first, second):
 
 def valid_box(box):
     return box and box[2] > box[0] and box[3] > box[1]
-
-
-class AnnotationTextDialog(simpledialog.Dialog):
-    def __init__(self, parent, title, initial=""):
-        self.initial = initial
-        super().__init__(parent, title)
-
-    def body(self, parent):
-        self.editor = tk.Text(parent, width=36, height=6, wrap="word")
-        self.editor.pack(fill="both", expand=True)
-        self.editor.insert("1.0", self.initial)
-        return self.editor
-
-    def buttonbox(self):
-        actions = ttk.Frame(self, padding=8)
-        actions.pack()
-        ttk.Button(actions, text="確定", command=self.ok).pack(side="left", padx=4)
-        ttk.Button(actions, text="取消", command=self.cancel).pack(side="left", padx=4)
-        self.bind("<Control-Return>", self.ok)
-        self.bind("<Escape>", self.cancel)
-
-    def apply(self):
-        self.result = self.editor.get("1.0", "end-1c")
 
 
 class CaptureOverlay:
@@ -84,8 +69,8 @@ class CaptureOverlay:
         self.top.withdraw()
         self.top.overrideredirect(True)
         self.top.attributes("-topmost", True)
-        self.top.configure(cursor="crosshair")
-        self.canvas = tk.Canvas(self.top, width=screenshot.width, height=screenshot.height, highlightthickness=0, bg="#202020")
+        self.canvas = tk.Canvas(self.top, width=screenshot.width, height=screenshot.height,
+                                highlightthickness=0, bg="#202020", cursor="crosshair")
         self.canvas.pack(fill="both", expand=True)
         self.document = Annotations()
         self._selection = self._hover = self._initial_selection = self._replay_image = None
@@ -114,10 +99,15 @@ class CaptureOverlay:
         self._decoration = {"rounded": tk.BooleanVar(master=self.top), "border": tk.BooleanVar(master=self.top),
                             "shadow": tk.BooleanVar(master=self.top, value=shadow)}
         self._selected = set()
+        self._drawing_style = None
+        self._text_editor = self._text_draft = self._text_index = self._text_editor_id = None
+        self._resume_text_resize = False
+        self._text_move_origin = None
+        self._text_move_caret = None
         self._clipboard = ()
         self._polyline = []
         self._drag = None
-        self._preview = None
+        self._shape_resize = None
         self._palette_dirty = False
         self._closed = False
         self._refreshing = False
@@ -127,6 +117,7 @@ class CaptureOverlay:
         self._toolbar_tip_timer = None
         self._toolbar_layout = None
         self._screen = self.canvas.create_image(0, 0, anchor="nw")
+        self._outside = self.canvas.create_image(0, 0, anchor="nw", state="hidden")
         self._crop = self.canvas.create_image(0, 0, anchor="nw")
         self._border = self.canvas.create_rectangle(0, 0, 0, 0, outline="#27a7e7", width=2, state="hidden")
         self._handles = [self.canvas.create_rectangle(0, 0, 0, 0, fill="white", outline="#27a7e7", state="hidden")
@@ -158,6 +149,7 @@ class CaptureOverlay:
     def _bind(self):
         for key, callback in {
             "<Motion>": self._on_motion, "<ButtonPress-1>": self._on_press, "<B1-Motion>": self._on_drag,
+            "<Double-Button-1>": self._on_double_click,
             "<ButtonRelease-1>": self._on_release, "<Button-3>": self._context_menu,
             "<Button-2>": lambda _: self._finish("sticker"), "<MouseWheel>": self._cycle_candidate,
         }.items():
@@ -178,7 +170,8 @@ class CaptureOverlay:
             "<period>": lambda _: self._replay(-1),
         }
         for key, callback in bindings.items():
-            self.top.bind(key, callback)
+            self.top.bind(key, callback if key == "<Escape>" else
+                          lambda event, action=callback: "break" if self._drag == "resize-annotation" else action(event))
         for key in ("Alt_L", "Alt_R"):
             self.top.bind(f"<KeyRelease-{key}>", lambda _: self._hide_magnifier() if self._selection else None)
         for key, dx, dy in (("Left", -1, 0), ("Right", 1, 0), ("Up", 0, -1), ("Down", 0, 1)):
@@ -224,7 +217,7 @@ class CaptureOverlay:
             self._icon_button(panel, "\ue8c8", "複製並完成 (Ctrl+C／Enter)", lambda: self._finish("clipboard"), True),
         ]
         self._variant_buttons = {
-            group: {tool: self._icon_button(panel, glyph, title, lambda value=tool: self._choose_tool(value))
+            group: {tool: self._icon_button(panel, glyph, title, lambda value=tool: self._choose_variant(value))
                     for tool, glyph, title in variants}
             for group, variants in TOOL_VARIANTS.items()
         }
@@ -331,8 +324,9 @@ class CaptureOverlay:
     def _set_color(self, color):
         self._color = color
         self._current_color_chip.configure(bg=color)
-        if self.settings.remember_colors and self._tool != "select":
-            self.settings.tool_colors = {**(self.settings.tool_colors or {}), self._tool: color}
+        tool = self._context_tool()
+        if self.settings.remember_colors and tool != "select":
+            self.settings.tool_colors = {**(self.settings.tool_colors or {}), tool: color}
             self._palette_dirty = True
         self._update_annotation_style(color=color)
 
@@ -360,6 +354,11 @@ class CaptureOverlay:
         return "break"
 
     def _update_annotation_style(self, **style):
+        if self._text_draft is not None:
+            self._text_draft = replace(self._text_draft, **style)
+            self._update_text_editor_geometry()
+            self._draw()
+            return
         if not self._selected:
             return
         self.document.replace(replace(item, **style) if index in self._selected else item
@@ -367,8 +366,10 @@ class CaptureOverlay:
         self._draw()
 
     def _choose_tool(self, tool):
+        self._finish_text_editor()
         if self._tool != tool:
             self._commit_polyline()
+        self._select_annotations(())
         self._tool = tool
         group = TOOL_GROUPS.get(tool)
         if group:
@@ -380,22 +381,68 @@ class CaptureOverlay:
             self._current_color_chip.configure(bg=self._color)
         self._hide_tooltip()
         self.canvas.focus_set()
-        self.top.configure(cursor="arrow" if tool == "select" else "crosshair")
+        self.canvas.configure(cursor="arrow" if tool == "select" else "crosshair")
         self._draw()
         return "break"
 
-    def _set_shape_fill(self, filled):
+    def _selected_annotation(self):
+        return self.document.items[next(iter(self._selected))] if len(self._selected) == 1 else None
+
+    def _context_tool(self):
+        item = self._text_draft or self._selected_annotation()
+        return item.tool if item is not None else self._tool
+
+    def _select_annotations(self, indexes):
+        self._selected = set(indexes)
+        item = self._selected_annotation()
+        if item is not None:
+            if self._drawing_style is None:
+                variables = (self._width, self._opacity, self._filled, self._text_background, self._dashed,
+                             self._ellipse, self._filter_strength, self._font, self._font_size, self._bold, self._italic)
+                self._drawing_style = (self._color, self._outline, self._outline_width,
+                                       tuple((variable, variable.get()) for variable in variables))
+            self._color, self._outline, self._outline_width = item.color, item.outline, item.outline_width
+            self._width.set(item.width)
+            self._opacity.set(round(item.opacity * 100 / 255))
+            self._filled.set(item.filled)
+            self._text_background.set(item.filled)
+            self._dashed.set(item.dashed)
+            self._ellipse.set(item.elliptical)
+            self._filter_strength.set(item.filter_strength if item.filter_strength is not None else 10)
+            self._font.set(item.font_family)
+            self._font_size.set(item.font_size)
+            self._bold.set(item.bold)
+            self._italic.set(item.italic)
+        elif self._drawing_style is not None:
+            self._color, self._outline, self._outline_width, values = self._drawing_style
+            for variable, value in values:
+                variable.set(value)
+            self._drawing_style = None
+        self._current_color_chip.configure(bg=self._color)
+
+    def _choose_variant(self, tool):
+        item = self._selected_annotation()
+        if item is None or TOOL_GROUPS.get(item.tool) != TOOL_GROUPS[tool]:
+            return self._choose_tool(tool)
+        points = item.points if tool == "polyline" else (item.points[0], item.points[-1])
+        filled = item.filled and tool != "rounded"
         self._filled.set(filled)
-        self._choose_tool("ellipse" if self._last_tools["shape"] == "ellipse" else "rectangle")
+        self._update_annotation_style(tool=tool, points=points, filled=filled)
+        return "break"
+
+    def _set_shape_fill(self, filled):
+        item = self._selected_annotation()
+        if item is not None and TOOL_GROUPS.get(item.tool) == "shape":
+            self._filled.set(filled)
+            self._update_annotation_style(filled=filled, tool="ellipse" if item.tool == "ellipse" else "rectangle")
+        else:
+            self._choose_tool("ellipse" if self._last_tools["shape"] == "ellipse" else "rectangle")
+            self._filled.set(filled)
+            self._draw()
 
     def _apply_text_style(self, event=None):
-        self.document.replace(
-            replace(item, font_family=self._font.get(), font_size=self._number(self._font_size, 22, 8, 144),
-                    bold=self._bold.get(), italic=self._italic.get(), filled=self._text_background.get())
-            if index in self._selected and item.tool == "text" else item
-            for index, item in enumerate(self.document.items)
-        )
-        self._draw()
+        self._update_annotation_style(font_family=self._font.get(), font_size=self._number(self._font_size, 22, 8, 144),
+                                      bold=self._bold.get(), italic=self._italic.get(), filled=self._text_background.get())
 
     def _local_point(self, event):
         return self._clamp_point((event.x_root - self.bounds["left"], event.y_root - self.bounds["top"]))
@@ -438,12 +485,16 @@ class CaptureOverlay:
         if self.auto_action:
             self.top.after_idle(lambda: self._finish(self.auto_action))
 
-    def _draw(self, temporary=None):
+    def _draw(self, temporary=None, resized_shape=None):
         box = temporary or self._selection or self._hover
         display = self._selection_display()
+        selected = temporary is None and self._selection is not None
+        if selected:
+            self._draw_outside_annotations(box, resized_shape)
+        else:
+            self.canvas.itemconfigure(self._outside, state="hidden")
         if valid_box(box):
-            selected = temporary is None and self._selection is not None
-            image = self._render(box) if selected else self.screenshot.crop(box)
+            image = self._render(box, resized_shape) if selected else self.screenshot.crop(box)
             self._crop_photo = ImageTk.PhotoImage(image, master=self.top)
             self.canvas.coords(self._crop, box[0], box[1])
             self.canvas.itemconfigure(self._crop, image=self._crop_photo, state="normal")
@@ -474,22 +525,23 @@ class CaptureOverlay:
                 self.canvas.itemconfigure(item, state="hidden")
             self.canvas.coords(self._info, display[0] + 16, display[1] + 16)
             self.canvas.itemconfigure(self._info, text="拖曳框選　F 選目前螢幕　Shift+F 選全部　右鍵開啟選項")
-        self._draw_selected_annotations()
+        self._draw_selected_annotations(resized_shape=resized_shape)
 
     def _layout_toolbar(self, display):
         scale, _ = self._selection_scale()
         available = display[2] - display[0]
-        group = TOOL_GROUPS.get(self._tool, self._tool)
-        key = (scale, available, self._tool)
+        active = self._context_tool()
+        group = TOOL_GROUPS.get(active, active)
+        key = (scale, available, active)
         self._undo_button.state(("!disabled",) if self.document.can_undo else ("disabled",))
         self._redo_button.state(("!disabled",) if self.document.can_redo else ("disabled",))
         for name, button in self._group_buttons.items():
             button.state(("selected",) if name == group else ("!selected",))
         for buttons in self._variant_buttons.values():
             for tool, button in buttons.items():
-                button.state(("selected",) if tool == self._tool else ("!selected",))
+                button.state(("selected",) if tool == active else ("!selected",))
         for filled, button in enumerate(self._shape_fill_buttons):
-            chosen = self._tool in ("rectangle", "ellipse") and self._filled.get() == bool(filled)
+            chosen = active in ("rectangle", "ellipse") and self._filled.get() == bool(filled)
             button.state(("selected",) if chosen else ("!selected",))
         if self._toolbar_layout == key:
             return self._toolbar_size
@@ -575,25 +627,143 @@ class CaptureOverlay:
             self.canvas.coords(handle, x - 3, y - 3, x + 3, y + 3)
             self.canvas.itemconfigure(handle, state="normal" if visible else "hidden")
 
-    def _draw_selected_annotations(self):
+    def _draw_selected_annotations(self, dx=0, dy=0, resized_shape=None):
         self.canvas.delete("selected-annotation")
+        if self._text_draft is not None:
+            self._draw_text_handles(self._text_draft)
         for index in self._selected:
-            if 0 <= index < len(self.document.items):
-                self.canvas.create_rectangle(*self.document.items[index].bounds(), outline="#27a7e7", dash=(3, 2),
+            if index == self._text_index or not 0 <= index < len(self.document.items):
+                continue
+            item = resized_shape[1] if resized_shape is not None and resized_shape[0] == index else self.document.items[index]
+            if len(self._selected) == 1 and item.tool == "text" and self._selection:
+                self._draw_text_handles(item, dx, dy)
+            elif len(self._selected) == 1 and item.tool in SHAPE_TOOLS and self._selection:
+                for handle in SHAPE_HANDLES:
+                    x, y = item.shape_handle(*handle)
+                    x, y = x + dx, y + dy
+                    self.canvas.create_oval(x - 3, y - 3, x + 3, y + 3, fill="#27a7e7", outline="white",
+                                            tags="selected-annotation")
+            else:
+                left, top, right, bottom = item.bounds()
+                self.canvas.create_rectangle(left + dx, top + dy, right + dx, bottom + dy,
+                                             outline="#27a7e7", dash=(3, 2),
                                              tags="selected-annotation")
         self.canvas.tag_raise(self._toolbar_id)
 
-    def _render(self, box=None):
+    def _draw_text_handles(self, item, dx=0, dy=0):
+        corners = [(x + dx, y + dy) for x, y in (item.shape_handle(*handle) for handle in TEXT_HANDLES)]
+        self.canvas.create_polygon(corners, fill="", outline="black", tags="selected-annotation")
+        radius = TEXT_HANDLE_RADIUS
+        for handle, (x, y) in zip(TEXT_HANDLES, corners):
+            self.canvas.create_oval(x - radius, y - radius, x + radius + 1, y + radius + 1,
+                                    fill="#1a84ff", outline="white", tags="selected-annotation")
+            if handle == TEXT_DELETE_CORNER:
+                self.canvas.create_line(x - 2, y - 2, x + 2, y + 2, fill="white", tags="selected-annotation")
+                self.canvas.create_line(x + 2, y - 2, x - 2, y + 2, fill="white", tags="selected-annotation")
+            else:
+                vx, vy = handle
+                self.canvas.create_line(x - vx * 3, y - vy * 3, x + vx * 3, y + vy * 3, fill="white",
+                                        arrow="both", arrowshape=(2, 3, 1), tags="selected-annotation")
+
+    def _inside_capture(self, point):
+        left, top, right, bottom = self._selection
+        return left <= point[0] <= right and top <= point[1] <= bottom
+
+    def _hit_annotation_handle(self, point):
+        item = self._text_draft or self._selected_annotation()
+        if not self._selection or item is None or self._tool == "erase" or self._polyline:
+            return None
+        handles = TEXT_HANDLES if item.tool == "text" else SHAPE_HANDLES if item.tool in SHAPE_TOOLS else ()
+        radius = TEXT_HANDLE_RADIUS + 1 if item.tool == "text" else 6
+        hits = []
+        for handle in handles:
+            x, y = item.shape_handle(*handle)
+            distance = (x - point[0]) ** 2 + (y - point[1]) ** 2
+            if distance <= radius ** 2:
+                hits.append((distance, handle))
+        return min(hits)[1] if hits else None
+
+    def _is_text_delete_handle(self, handle):
+        item = self._text_draft or self._selected_annotation()
+        return item is not None and item.tool == "text" and handle == TEXT_DELETE_CORNER
+
+    def _in_text_frame(self, point):
+        item = self._text_draft or self._selected_annotation()
+        if item is None or item.tool != "text" or self._tool == "erase":
+            return False
+        cx, cy = item.shape_handle(0, 0)
+        x, y = rotate_offset(point[0] - cx, point[1] - cy, -item.angle)
+        return contains(item.text_box(), (cx + x, cy + y))
+
+    def _update_pointer_cursor(self, point):
+        handle = self._hit_annotation_handle(point)
+        cursor = "arrow" if self._tool == "select" else "crosshair"
+        if handle is not None:
+            cursor = ("hand2" if self._is_text_delete_handle(handle) else
+                      self._resize_cursor(handle, (self._text_draft or self._selected_annotation()).angle))
+        elif self._in_text_frame(point):
+            cursor = "fleur"
+        if self.canvas.cget("cursor") != cursor:
+            self.canvas.configure(cursor=cursor)
+        if self._text_editor is not None:
+            self._text_editor.configure(cursor=cursor if cursor != "crosshair" else "xterm")
+
+    @staticmethod
+    def _resize_cursor(handle, angle):
+        x, y = rotate_offset(*handle, angle)
+        return RESIZE_CURSORS[round(degrees(atan2(y, x)) / 45) % 4]
+
+    def _resized_shape(self, point):
+        index, item, handle = self._shape_resize
+        dx, dy = point[0] - self._start[0], point[1] - self._start[1]
+        return index, item.resize_text(handle, dx, dy) if item.tool == "text" else item.resize_shape(handle, dx, dy)
+
+    def _preview_annotations(self, resized_shape):
+        items = self.document.items
+        if resized_shape is not None:
+            index, item = resized_shape
+            items = (*items[:index], item, *items[index + 1:])
+        if self._text_index is not None:
+            items = (*items[:self._text_index], *items[self._text_index + 1:])
+        return items
+
+    def _draw_outside_annotations(self, box, resized_shape):
+        left, top, right, bottom = box
+        items = []
+        bounds = []
+        for item in self._preview_annotations(resized_shape):
+            if item.tool not in OUTSIDE_SELECTION_TOOLS:
+                continue
+            mark = intersection(item.visual_bounds(), (0, 0, *self.screenshot.size))
+            if valid_box(mark) and (mark[0] < left or mark[1] < top or mark[2] > right or mark[3] > bottom):
+                items.append(item)
+                bounds.append(mark)
+        if not bounds:
+            self.canvas.itemconfigure(self._outside, state="hidden")
+            return
+        region = (min(b[0] for b in bounds), min(b[1] for b in bounds),
+                  max(b[2] for b in bounds), max(b[3] for b in bounds))
+        image = render_annotations(self.screenshot, region, items)
+        image = ImageEnhance.Brightness(image).enhance(0.55)
+        overlap = intersection(region, box)
+        if valid_box(overlap):
+            x, y = region[:2]
+            image.paste((0, 0, 0, 0), (overlap[0] - x, overlap[1] - y, overlap[2] - x, overlap[3] - y))
+        self._outside_photo = ImageTk.PhotoImage(image, master=self.top)
+        self.canvas.coords(self._outside, *region[:2])
+        self.canvas.itemconfigure(self._outside, image=self._outside_photo, state="normal")
+
+    def _render(self, box=None, resized_shape=None):
         box = box or self._selection
-        base = self.screenshot
+        items = self._preview_annotations(resized_shape)
         if self._board or self._replay_image is not None:
             source = self._replay_image or Image.new("RGBA", (box[2] - box[0], box[3] - box[1]), self._board)
             if source.size != (box[2] - box[0], box[3] - box[1]):
                 source = source.resize((box[2] - box[0], box[3] - box[1]), RESAMPLE.LANCZOS)
             annotations = [replace(item, points=tuple((x - box[0], y - box[1]) for x, y in item.points))
-                           for item in self.document.items]
+                           for item in items]
             return render_annotations(source, (0, 0, *source.size), annotations)
-        return render_annotations(base, box, self.document.items)
+        return render_annotations(self.screenshot, box, items)
 
     def _candidate(self, event):
         point = (event.x_root, event.y_root)
@@ -613,6 +783,7 @@ class CaptureOverlay:
     def _on_motion(self, event):
         if self._drag:
             return
+        self._update_pointer_cursor(self._local_point(event))
         if not self._selection and not self.editing:
             window, children = self._candidate(event)
             box = children[0] if children else window
@@ -658,44 +829,72 @@ class CaptureOverlay:
             self.canvas.itemconfigure(item, state="hidden")
 
     def _on_press(self, event):
-        self.canvas.focus_set()
         point = self._local_point(event)
+        active_handle = self._hit_annotation_handle(point)
+        if self._is_text_delete_handle(active_handle):
+            editing_new = self._text_editor is not None and self._text_index is None
+            self._finish_text_editor(commit=False)
+            if not editing_new:
+                self._delete_annotations()
+            self.canvas.focus_set()
+            self._draw()
+            self._update_pointer_cursor(point)
+            return "break"
+        if active_handle is None and self._text_editor is not None and self._in_text_frame(point):
+            self._start_text_move(point)
+            return "break"
+        self._resume_text_resize = (self._text_editor is not None and
+                                    bool(self._text_editor.get("1.0", "end-1c").strip()) and active_handle is not None)
+        self._finish_text_editor()
+        self.canvas.focus_set()
         self._start = point
         self._initial_selection = self._selection
         self._initial_hover = self._hover
         self._shift = bool(event.state & 1)
         self._clone = bool(event.state & 4)
         self._points = [point]
-        if self._selection and self._tool == "select":
-            hit = self.document.hit(point)
+        handle = self._hit_annotation_handle(point)
+        if handle is not None and not self._is_text_delete_handle(handle):
+            index = next(iter(self._selected))
+            item = self.document.items[index]
+            self._shape_resize = (index, item, handle)
+            self._drag = "resize-annotation"
+            self.canvas.configure(cursor=self._resize_cursor(handle, item.angle))
+            return
+        inside = self._selection and self._inside_capture(point)
+        if self._selection and self._tool != "erase" and not self._polyline:
+            hit = self._hit_annotation(point, precise=self._tool != "select")
             if hit is not None:
                 if self._shift:
-                    self._selected.symmetric_difference_update({hit})
-                    self._draw_selected_annotations()
+                    self._select_annotations(self._selected ^ {hit})
+                    self._draw()
                     return
                 if hit not in self._selected:
-                    self._selected = {hit}
+                    self._select_annotations({hit})
                 self._drag = "move-annotation"
-                self._draw_selected_annotations()
+                self._draw()
                 return
-            if (self._shift or self._free_select.get()) and contains(self._selection, point):
+        if self._selection and self._tool == "select":
+            if inside and (self._shift or self._free_select.get()):
                 self._drag = "select-annotations"
                 return
-            self._selected.clear()
+            if self._selected:
+                self._select_annotations(())
+                self._draw()
             if not self.editing:
                 self._edges = self._hit_edges(point)
                 if any(self._edges):
                     self._drag = "resize"
                     return
-                if contains(self._selection, point):
+                if inside:
                     self._drag = "move"
                     return
-        if self._selection and contains(self._selection, point) and self._tool != "select":
+        if self._selection and self._tool != "select" and (inside or self._tool in OUTSIDE_SELECTION_TOOLS):
+            if self._selected:
+                self._select_annotations(())
+                self._draw()
             if self._tool == "text":
-                text = AnnotationTextDialog(self.top, "文字標註").result
-                if text:
-                    self._add_annotation(self._annotation("text", (point,), text))
-                    self._draw()
+                self._drag = "draw-text"
             elif self._tool == "number":
                 number = max((int(item.text) for item in self.document.items if item.tool == "number"), default=0) + 1
                 self._add_annotation(self._annotation("number", (point,), str(number)))
@@ -706,16 +905,34 @@ class CaptureOverlay:
             elif self._tool == "erase" and not self._round_eraser.get():
                 hit = self.document.hit(point)
                 if hit is not None:
-                    self._selected = {hit}
+                    self._select_annotations({hit})
                     self._delete_annotations()
             else:
                 self._drag = "draw"
             return
         if not self.editing:
+            self._select_annotations(())
             self._drag = "new"
             self._selection = None
             self._hover = None
             self._replay_image = None
+
+    def _on_double_click(self, event):
+        point = self._local_point(event)
+        if self._hit_annotation_handle(point) is not None:
+            return self._on_press(event)
+        if self._selection and self._tool != "erase" and not self._polyline:
+            hit = self._hit_annotation(point, precise=self._tool != "select")
+            if hit is not None and self.document.items[hit].tool == "text":
+                self._drag = None
+                self._select_annotations({hit})
+                self._draw()
+                return self._edit_annotation_text()
+        return self._on_press(event)
+
+    def _hit_annotation(self, point, precise=False):
+        tools = None if self._inside_capture(point) else OUTSIDE_SELECTION_TOOLS
+        return self.document.hit(point, precise=precise, tools=tools)
 
     def _hit_edges(self, point):
         l, t, r, b = self._selection
@@ -748,7 +965,19 @@ class CaptureOverlay:
         self.canvas.delete("draw-preview")
         if self._drag in ("new", "move", "resize"):
             self._draw(self._drag_box(point))
-        elif self._drag in ("select-annotations", "move-annotation"):
+        elif self._drag == "move-inline-text":
+            self._move_inline_text(point)
+        elif self._drag == "move-annotation":
+            dx, dy = point[0] - self._start[0], point[1] - self._start[1]
+            item = self._selected_annotation()
+            if item is not None and item.tool in OUTSIDE_SELECTION_TOOLS and not self._clone:
+                moved = replace(item, points=tuple((x + dx, y + dy) for x, y in item.points))
+                self._draw(resized_shape=(next(iter(self._selected)), moved))
+            else:
+                self._draw_selected_annotations(dx, dy)
+        elif self._drag == "resize-annotation":
+            self._draw(resized_shape=self._resized_shape(point))
+        elif self._drag in ("select-annotations", "draw-text"):
             self.canvas.create_rectangle(*ordered_box(self._start, point), outline="#27a7e7", dash=(4, 2),
                                          tags="draw-preview")
         elif self._tool == "pen":
@@ -770,13 +999,15 @@ class CaptureOverlay:
         point = self._local_point(event)
         self.canvas.delete("draw-preview")
         mode = self._drag
+        if mode == "move-inline-text":
+            return self._end_text_move(point)
         if mode in ("new", "move", "resize"):
             box = self._drag_box(point)
             if mode == "new" and min(box[2] - box[0], box[3] - box[1]) < 3:
                 box = self._initial_hover
             if mode == "new":
                 self.document = Annotations()
-                self._selected.clear()
+                self._select_annotations(())
             self._drag = None
             if valid_box(box):
                 self._set_selection(box)
@@ -785,29 +1016,59 @@ class CaptureOverlay:
             return
         if mode == "select-annotations" or mode == "draw" and self._tool == "erase":
             box = ordered_box(self._start, point)
-            self._selected = {index for index, item in enumerate(self.document.items)
-                              if self._hits_annotation(box, item.bounds(), self._tool == "erase")}
+            self._select_annotations(index for index, item in enumerate(self.document.items)
+                                     if self._hits_annotation(box, item.bounds(), self._tool == "erase"))
             if self._tool == "erase":
                 self._delete_annotations()
         elif mode == "move-annotation":
-            dx, dy = point[0] - self._start[0], point[1] - self._start[1]
-            if dx or dy:
-                items = list(self.document.items)
-                clones = []
-                for index in sorted(self._selected):
-                    item = items[index]
-                    moved = replace(item, points=tuple((x + dx, y + dy) for x, y in item.points))
-                    if self._clone:
-                        clones.append(moved)
-                    else:
-                        items[index] = moved
-                if clones:
-                    self._selected = set(range(len(items), len(items) + len(clones)))
-                self.document.replace(items + clones)
+            self._move_annotations(point[0] - self._start[0], point[1] - self._start[1], clone=self._clone)
+        elif mode == "draw-text":
+            left, top, right, bottom = ordered_box(self._start, point)
+            drawn_height = bottom - top
+            if right - left < 8:
+                right = min(self.screenshot.width, left + 220)
+                left = max(0, min(left, right - 8))
+            if bottom - top < 8:
+                bottom = min(self.screenshot.height, top + 44)
+                top = max(0, min(top, bottom - 8))
+            self._drag = None
+            item = self._annotation("text", ((left, top), (max(left + 8, right), max(top + 8, bottom))))
+            if drawn_height >= 8:
+                item = replace(item, font_size=self._fit_text_font_size(item, drawn_height))
+            self._begin_text_editor(item)
+            return
+        elif mode == "resize-annotation":
+            if self.canvas.grab_current() == self.canvas:
+                self.canvas.grab_release()
+            index, item = self._resized_shape(point)
+            items = self.document.items
+            self.document.replace((*items[:index], item, *items[index + 1:]))
+            self._shape_resize = None
+            if item.tool == "text":
+                self._select_annotations({index})
+                if self._resume_text_resize:
+                    self._resume_text_resize = False
+                    self._drag = None
+                    self._begin_text_editor(item, index)
+                    return
         elif mode == "draw":
-            self._add_annotation(self._annotation(self._tool, tuple([*self._points, point])))
+            if self._tool not in SHAPE_TOOLS or valid_box(ordered_box(self._start, point)):
+                self._add_annotation(self._annotation(self._tool, (*self._points, point)))
         self._drag = None
         self._draw()
+        self._update_pointer_cursor(point)
+
+    def _move_annotations(self, dx, dy, clone=False):
+        if not (dx or dy):
+            return
+        items = list(self.document.items)
+        moved = {index: replace(items[index], points=tuple((x + dx, y + dy) for x, y in items[index].points))
+                 for index in sorted(self._selected)}
+        if clone:
+            self.document.replace((*items, *moved.values()))
+            self._select_annotations(range(len(items), len(self.document.items)))
+        else:
+            self.document.replace(moved.get(index, item) for index, item in enumerate(items))
 
     @staticmethod
     def _number(variable, default, minimum, maximum):
@@ -852,8 +1113,8 @@ class CaptureOverlay:
 
     def _add_annotation(self, annotation):
         self.document.add(annotation)
-        if self.settings.select_new_annotation:
-            self._selected = {len(self.document.items) - 1}
+        if annotation.tool in SHAPE_TOOLS or self.settings.select_new_annotation:
+            self._select_annotations({len(self.document.items) - 1})
 
     def _tab_candidate(self, event):
         if not self._selection:
@@ -888,7 +1149,12 @@ class CaptureOverlay:
         return "break"
 
     def _nudge(self, event, dx, dy):
-        if not self.editing and self._selection:
+        if self._drag == "resize-annotation":
+            return "break"
+        if self._selection and self._selected:
+            self._move_annotations(dx, dy)
+            self._draw()
+        elif not self.editing and self._selection:
             l, t, r, b = self._selection
             dx, dy = min(self.screenshot.width - r, max(-l, dx)), min(self.screenshot.height - b, max(-t, dy))
             self._set_selection((l + dx, t + dy, r + dx, b + dy))
@@ -898,14 +1164,15 @@ class CaptureOverlay:
         return "break"
 
     def _undo(self, redo):
+        self._finish_text_editor()
         (self.document.redo if redo else self.document.undo)()
-        self._selected.clear()
+        self._select_annotations(())
         self._draw()
         return "break"
 
     def _delete_annotations(self, event=None):
         self.document.replace(item for index, item in enumerate(self.document.items) if index not in self._selected)
-        self._selected.clear()
+        self._select_annotations(())
         self._draw()
         return "break"
 
@@ -916,8 +1183,9 @@ class CaptureOverlay:
     def _paste_annotations(self, event=None):
         if self._selection and self._clipboard:
             copies = tuple(replace(item, points=tuple((x + 12, y + 12) for x, y in item.points)) for item in self._clipboard)
-            self._selected = set(range(len(self.document.items), len(self.document.items) + len(copies)))
+            start = len(self.document.items)
             self.document.replace((*self.document.items, *copies))
+            self._select_annotations(range(start, len(self.document.items)))
             self._draw()
         return "break"
 
@@ -953,7 +1221,7 @@ class CaptureOverlay:
                 width, height = min(image.width, self.screenshot.width), min(image.height, self.screenshot.height)
                 l, t = min(l, self.screenshot.width - width), min(t, self.screenshot.height - height)
                 self.document = Annotations()
-                self._selected.clear()
+                self._select_annotations(())
                 self._board = None
                 self._replay_image = image
                 self._set_selection((l, t, l + width, t + height))
@@ -987,20 +1255,23 @@ class CaptureOverlay:
         return "break"
 
     def _context_menu(self, event=None):
+        if self._text_editor is not None:
+            self._end_text_input()
         if self._polyline:
             self._commit_polyline()
             self._draw()
             return
-        if event is not None and self._tool == "select":
-            hit = self.document.hit(self._local_point(event))
+        if event is not None and self._selection:
+            hit = self._hit_annotation(self._local_point(event))
             if hit is not None and hit not in self._selected:
-                self._selected = {hit}
-                self._draw_selected_annotations()
+                self._select_annotations({hit})
+                self._draw()
         menu = tk.Menu(self.top, tearoff=False)
         if self._selected:
             menu.add_command(label="複製標註 Ctrl+Shift+C", command=self._copy_annotations)
             menu.add_command(label="貼上標註 Ctrl+Shift+V", command=self._paste_annotations)
-            menu.add_command(label="修改文字…", command=self._edit_annotation_text)
+            if any(self.document.items[index].tool == "text" for index in self._selected):
+                menu.add_command(label="修改文字…", command=self._edit_annotation_text)
             menu.add_command(label="旋轉標註…", command=self._rotate_annotations)
             menu.add_command(label="套用目前色彩、粗細與透明度",
                              command=lambda: self._update_annotation_style(
@@ -1055,15 +1326,170 @@ class CaptureOverlay:
 
     def _edit_annotation_text(self):
         index = next((index for index in self._selected if self.document.items[index].tool == "text"), None)
-        if index is None:
+        if index is not None:
+            self._begin_text_editor(self.document.items[index], index)
+        return "break"
+
+    @staticmethod
+    def _text_font_spec(item, size):
+        styles = " ".join(style for style, enabled in (("bold", item.bold), ("italic", item.italic)) if enabled)
+        return item.font_family, -size, styles or "normal"
+
+    def _fit_text_font_size(self, item, height):
+        available = height - (TEXT_PADDING + item.outline_width) * 2
+        sample = font.Font(root=self.top, font=self._text_font_spec(item, 8))
+        low, high = 8, 144
+        while low < high:
+            size = (low + high + 1) // 2
+            sample.configure(size=-size)
+            pil_font = image_font(size, item.font_family, item.bold, item.italic)
+            exported_height = pil_font.getbbox("Ag")[3]
+            if max(sample.metrics("linespace"), exported_height) <= available:
+                low = size
+            else:
+                high = size - 1
+        return low
+
+    def _begin_text_editor(self, item, index=None):
+        self._finish_text_editor()
+        self._text_draft_font_size = self._font_size.get()
+        self._font_size.set(item.font_size)
+        self._text_draft = item
+        self._text_index = index
+        # Use a native text widget for caret, selection, and IME input.
+        editor = self._text_editor = tk.Text(self.canvas, wrap="char", undo=True, relief="flat", borderwidth=0,
+                                             highlightthickness=0, padx=0, pady=0, exportselection=False,
+                                             insertwidth=2, insertontime=530, insertofftime=530)
+        editor.insert("1.0", item.text)
+        editor.edit_reset()
+        editor.edit_modified(False)
+        editor.bind("<<Modified>>", self._on_text_modified)
+        editor.bind("<Escape>", self._cancel)
+        editor.bind("<Control-Return>", lambda _: self._end_text_input())
+        editor.bind("<ButtonPress-1>", self._text_editor_press)
+        editor.bind("<Double-Button-1>", self._text_editor_press)
+        editor.bind("<Motion>", lambda event: self._update_pointer_cursor(self._local_point(event)))
+        # Keep screenshot shortcuts from firing while typing or using Ctrl+C/Ctrl+Z in the widget.
+        editor.bindtags(tuple(tag for tag in editor.bindtags() if tag != str(self.top)))
+        self._text_editor_id = self.canvas.create_window(0, 0, window=editor, anchor="nw", tags="text-editor")
+        self._update_text_editor_geometry()
+        self._draw()
+        editor.focus_force()
+        editor.mark_set("insert", "end-1c")
+        editor.see("insert")
+
+    def _text_editor_press(self, event):
+        if self._hit_annotation_handle(self._local_point(event)) is not None:
+            self._on_press(event)
+            if self._drag == "resize-annotation":
+                self.canvas.grab_set()
+            return "break"
+        point = self._local_point(event)
+        if self._in_text_frame(point):
+            self._start_text_move(point, self._text_editor.index(f"@{event.x},{event.y}"))
+            return "break"
+
+    def _start_text_move(self, point, caret=None):
+        self._start = point
+        self._text_move_origin = self._text_draft.points
+        self._text_move_caret = caret
+        self._drag = "move-inline-text"
+        self.canvas.grab_set()
+        self.canvas.configure(cursor="fleur")
+
+    def _move_inline_text(self, point):
+        dx, dy = point[0] - self._start[0], point[1] - self._start[1]
+        self._text_draft = replace(self._text_draft, points=tuple((x + dx, y + dy) for x, y in self._text_move_origin))
+        self._update_text_editor_geometry()
+        self._draw_selected_annotations()
+
+    def _end_text_move(self, point, cancel=False):
+        click = not cancel and max(abs(point[0] - self._start[0]), abs(point[1] - self._start[1])) < 2
+        self._move_inline_text(self._start if cancel or click else point)
+        self._drag = self._text_move_origin = None
+        self.canvas.grab_release()
+        if click and self._text_move_caret is not None:
+            self._text_editor.mark_set("insert", self._text_move_caret)
+            self._text_editor.tag_remove("sel", "1.0", "end")
+        self._text_move_caret = None
+        self._text_editor.focus_set()
+        self._update_pointer_cursor(point)
+        return "break"
+
+    def _on_text_modified(self, event):
+        if self._text_editor is None or not self._text_editor.edit_modified():
             return
-        item = self.document.items[index]
-        value = AnnotationTextDialog(self.top, "修改標註", item.text).result
-        if value:
-            items = list(self.document.items)
-            items[index] = replace(item, text=value)
-            self.document.replace(items)
-            self._draw()
+        self._text_editor.edit_modified(False)
+        self._update_text_editor_geometry()
+        self._draw_selected_annotations()
+
+    def _update_text_editor_geometry(self):
+        editor = self._text_editor
+        item = self._text_draft
+        if editor is None or item is None:
+            return
+        left, top, right, bottom = item.text_box()
+        width = right - left
+        value = editor.get("1.0", "end-1c")
+        font = image_font(item.font_size, item.font_family, item.bold, item.italic)
+        padding = TEXT_PADDING + item.outline_width
+        wrapped = wrap_annotation_text(value + "\u200b", font, max(1, width - 2 * padding))
+        height = max(bottom - top, font.getbbox("Ag")[3] + 2 * padding + wrapped.count("\n") * (item.font_size + 4))
+        height = max(bottom - top, min(height, max(8, self.screenshot.height - top)))
+        self._text_draft = replace(item, text=value, points=((left, top), (right, top + height)))
+        background = "white" if item.filled else self._text_background_color(left, top)
+        red, green, blue = editor.winfo_rgb(background)
+        caret_color = "black" if 0.299 * red + 0.587 * green + 0.114 * blue >= 32768 else "white"
+        editor.configure(font=self._text_font_spec(item, item.font_size), foreground=item.color,
+                         insertbackground=caret_color, background=background)
+        inset_x = min(TEXT_PADDING, (width - 1) // 2)
+        inset_y = min(TEXT_PADDING, (height - 1) // 2)
+        self.canvas.coords(self._text_editor_id, left + inset_x, top + inset_y)
+        self.canvas.itemconfigure(self._text_editor_id, width=width - 2 * inset_x, height=height - 2 * inset_y)
+        self.canvas.tag_raise(self._text_editor_id)
+
+    def _text_background_color(self, x, y):
+        inside = self._inside_capture((x, y))
+        image = self.screenshot
+        if inside and (self._board or self._replay_image is not None):
+            if self._replay_image is None:
+                return self._board if isinstance(self._board, str) else "white"
+            image = self._replay_image
+            x -= self._selection[0]
+            y -= self._selection[1]
+        pixel = image.getpixel((min(image.width - 1, max(0, x)), min(image.height - 1, max(0, y))))
+        rgb = pixel[:3] if inside else tuple(int(channel * 0.55) for channel in pixel[:3])
+        return "#%02x%02x%02x" % rgb
+
+    def _finish_text_editor(self, commit=True):
+        if self._text_editor is None:
+            return
+        self._update_text_editor_geometry()
+        item, index = self._text_draft, self._text_index
+        self.canvas.delete(self._text_editor_id)
+        self._text_editor.destroy()
+        self._text_editor = self._text_draft = self._text_index = self._text_editor_id = None
+        self._font_size.set(self._text_draft_font_size)
+        if not commit:
+            return
+        if item.text.strip():
+            if index is None:
+                self.document.add(item)
+                index = len(self.document.items) - 1
+            else:
+                items = self.document.items
+                self.document.replace((*items[:index], item, *items[index + 1:]))
+            self._select_annotations({index})
+        elif index is not None:
+            items = self.document.items
+            self.document.replace((*items[:index], *items[index + 1:]))
+            self._select_annotations(())
+
+    def _end_text_input(self, commit=True):
+        self._finish_text_editor(commit)
+        self.canvas.focus_set()
+        self._draw()
+        return "break"
 
     def _input_size(self):
         if self.editing:
@@ -1164,6 +1590,7 @@ class CaptureOverlay:
                 messagebox.showerror("MySnip", str(error), parent=self.top)
 
     def _save(self, event=None):
+        self._finish_text_editor()
         if not self._selection:
             return "break"
         self._commit_polyline()
@@ -1186,6 +1613,7 @@ class CaptureOverlay:
         return "break"
 
     def _output_image(self):
+        self._finish_text_editor()
         return decorate(self._render(), **{name: value.get() for name, value in self._decoration.items()})
 
     def _share_selection(self):
@@ -1206,6 +1634,25 @@ class CaptureOverlay:
         return "break"
 
     def _cancel(self, event=None):
+        if self._drag == "move-inline-text":
+            return self._end_text_move(self._start, cancel=True)
+        if self._text_editor is not None:
+            return self._end_text_input(commit=False)
+        if self._drag == "draw-text":
+            self._drag = None
+            self.canvas.delete("draw-preview")
+            return "break"
+        if self._drag == "resize-annotation":
+            if self.canvas.grab_current() == self.canvas:
+                self.canvas.grab_release()
+            index, item, _ = self._shape_resize
+            self._shape_resize = self._drag = None
+            if item.tool == "text" and self._resume_text_resize:
+                self._resume_text_resize = False
+                self._begin_text_editor(item, index)
+            self._draw()
+            self._update_pointer_cursor(self._local_point(event) if event is not None else self._start)
+            return "break"
         if self.settings.record_canceled and not self.editing:
             image = self._render() if self._selection else self.screenshot
             self._close(image, "canceled", self._global_box(self._selection or (0, 0, *self.screenshot.size)))

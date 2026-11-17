@@ -79,6 +79,7 @@ class MySnipApp:
         self.all_hidden = False
         self.solo = False
         self._active_capture = False
+        self._editing_sticker = False
         self._overlay = None
         self._saving = None
         self._quitting = False
@@ -318,14 +319,13 @@ class MySnipApp:
         self._active_capture = True
         active = capture_window_rect(user32.GetForegroundWindow())
         self.root.after(round((command.delay if command else delay) * 1000),
-                        lambda: self._hide_before_capture(active, region, action, command))
+                        lambda: self._begin_desktop_capture(active, region, action, command))
 
-    def _hide_before_capture(self, active, region, action, command):
+    def _begin_desktop_capture(self, active, region, action, command):
         if not self._active_capture:
             return
         active = capture_window_rect(user32.GetForegroundWindow()) or active
-        self.update_sticker_visibility()
-        self.root.after(115, lambda: self._capture(active, region, action, command))
+        self._capture(active, region, action, command)
 
     def _capture(self, active, region, action, command):
         try:
@@ -543,13 +543,13 @@ class MySnipApp:
 
     def update_sticker_visibility(self):
         for sticker in self.stickers:
-            visible = (not self._active_capture and not self.all_hidden and not sticker.hidden
+            visible = (not self._editing_sticker and not self.all_hidden and not sticker.hidden
                        and sticker.group == self.active_group and (not self.solo or sticker.selected)
                        and (self.settings.follow_desktop or not self.active_desktop
                             or not sticker.desktop or sticker.desktop == self.active_desktop))
             sticker.set_visible(visible)
             if visible and self.active_desktop:
-                self._desktops.move(hwnd(sticker.top), self.active_desktop)
+                sticker.move_to_desktop(self._desktops, self.active_desktop)
 
     def toggle_stickers(self):
         self.all_hidden = not self.all_hidden
@@ -712,12 +712,12 @@ class MySnipApp:
         image = Image.new("RGBA", (bounds["width"], bounds["height"]))
         offset_x, offset_y = x - bounds["left"], y - bounds["top"]
         image.paste(preview, (offset_x, offset_y))
-        self._active_capture = True
+        self._active_capture = self._editing_sticker = True
         self.update_sticker_visibility()
 
         def completed(result, action, region):
             document = self._overlay.document
-            self._active_capture = False
+            self._active_capture = self._editing_sticker = False
             self._overlay = None
             self.update_sticker_visibility()
             if result is not None:
@@ -740,7 +740,7 @@ class MySnipApp:
                                            region=(x, y, x + preview.width, y + preview.height),
                                            editing=True)
         except (OSError, tk.TclError):
-            self._active_capture = False
+            self._active_capture = self._editing_sticker = False
             self.update_sticker_visibility()
             raise
 
