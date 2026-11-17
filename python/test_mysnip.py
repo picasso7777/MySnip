@@ -111,6 +111,65 @@ class MySnipTests(unittest.TestCase):
 
                 self.assertNotEqual(render(4).tobytes(), render(24).tobytes())
 
+    def test_annotation_hit_prefers_visible_strokes_and_allows_nested_drawing(self):
+        edits = Annotations()
+        edits.add(Annotation("pen", ((20, 20), (80, 80))))
+        edits.add(Annotation("rectangle", ((10, 10), (90, 90)), filled=True))
+        edits.add(Annotation("mosaic", ((100, 20), (160, 80)), elliptical=True))
+        self.assertEqual(edits.hit((20, 20)), 0)
+        self.assertEqual(edits.hit((10, 50), precise=True), 1)
+        self.assertIsNone(edits.hit((25, 70), precise=True))
+        self.assertEqual(edits.hit((25, 70)), 1)
+        self.assertEqual(edits.hit((130, 20), precise=True), 2)
+        self.assertIsNone(edits.hit((130, 50), precise=True))
+
+    def test_resize_shape_keeps_opposite_handle_and_styles(self):
+        shape = Annotation("rectangle", ((160, 120), (40, 20)), width=6, filled=True)
+        self.assertEqual(shape.resize_shape((-1, 0), 30, 20).points, ((70, 20), (160, 120)))
+        self.assertEqual(shape.resize_shape((0, -1), 20, 30).points, ((40, 50), (160, 120)))
+        self.assertEqual(shape.resize_shape((1, 1), 30, 20).points, ((40, 20), (190, 140)))
+        self.assertEqual(shape.resize_shape((1, 0), -200, 0).shape_box(), (40, 20, 41, 120))
+        self.assertIs(shape.resize_shape((1, 1), 0, 0), shape)
+
+        rotated = Annotation("ellipse", ((40, 20), (160, 120)), width=6, filled=True, angle=90)
+        resized = rotated.resize_shape((1, 0), 0, 30)
+        self.assertAlmostEqual(resized.shape_handle(-1, 0)[0], rotated.shape_handle(-1, 0)[0])
+        self.assertAlmostEqual(resized.shape_handle(-1, 0)[1], rotated.shape_handle(-1, 0)[1])
+        self.assertEqual(resized.shape_box()[2] - resized.shape_box()[0], 150)
+        self.assertEqual((resized.width, resized.filled, resized.angle), (6, True, 90))
+
+    def test_annotations_cross_selection_before_export_is_cropped(self):
+        desktop = Image.new("RGBA", (180, 140))
+        region = (25, 20, 100, 110)
+        marks = (
+            Annotation("rectangle", ((55, 30), (145, 95)), width=4),
+            Annotation("rectangle", ((55, 30), (145, 95)), width=4, angle=27),
+            Annotation("text", ((60, 65), (155, 114)), text="Outside edge", font_size=21),
+            Annotation("text", ((60, 65), (155, 114)), text="Outside edge", font_size=21, angle=-18),
+        )
+        for mark in marks:
+            with self.subTest(tool=mark.tool, angle=mark.angle):
+                preview = render_annotations(desktop, (0, 0, *desktop.size), [mark])
+                exported = render_annotations(desktop, region, [mark])
+                self.assertEqual(exported.size, (75, 90))
+                self.assertIsNotNone(preview.crop((100, 0, 180, 140)).getbbox())
+                self.assertIsNotNone(exported.getbbox())
+                self.assertEqual(preview.crop(region).tobytes(), exported.tobytes())
+
+    def test_text_corner_scales_font_and_keeps_opposite_corner(self):
+        item = Annotation("text", ((20, 40), (140, 100)), text="First line\nSecond line", font_size=20)
+        resized = item.resize_text((1, 1), 60, 30)
+        self.assertEqual(resized.text_box(), (20, 40, 200, 130))
+        self.assertEqual(resized.font_size, 30)
+        self.assertEqual(resized.text, item.text)
+        self.assertIs(item.resize_text((1, 1), 0, 0), item)
+        smaller = item.resize_text((-1, -1), 60, 30)
+        self.assertEqual(smaller.text_box(), (80, 70, 140, 100))
+        self.assertEqual(smaller.font_size, 10)
+        rendered = render_annotations(Image.new("RGBA", (240, 160)), (0, 0, 240, 160), [resized])
+        left, top, right, bottom = rendered.getbbox()
+        self.assertTrue(20 <= left < right <= 200 and 40 <= top < bottom <= 130)
+
     def test_clipboard_html_and_shortcuts(self):
         self.assertEqual(plain_html("<p>你好 &amp; hi</p><style>hidden</style><p>next</p>"), "你好 & hi\nnext")
         self.assertEqual(parse_shortcut("Ctrl+Alt+F8"), (0x4003, 0x77))

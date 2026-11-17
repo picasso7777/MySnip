@@ -6,7 +6,7 @@ import math
 import os
 import re
 import winreg
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -15,7 +15,17 @@ from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont, ImageOps, 
 
 RESAMPLE = getattr(Image, "Resampling", Image)
 TRANSPOSE = getattr(Image, "Transpose", Image)
+AFFINE = getattr(Image, "Transform", Image).AFFINE
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".ico", ".webp", ".tga"}
+FILTER_TOOLS = ("mosaic", "blur", "magnify")
+TEXT_PADDING = 7
+SHAPE_TOOLS = ("rectangle", "rounded", "ellipse", "marker_rectangle", "marker_ellipse")
+
+
+def rotate_offset(x, y, angle):
+    angle = math.radians(angle)
+    cosine, sine = math.cos(angle), math.sin(angle)
+    return x * cosine - y * sine, x * sine + y * cosine
 
 
 @dataclass
@@ -245,19 +255,108 @@ class Annotation:
     angle: float = 0
     filter_strength: int | None = None
 
+    def shape_box(self):
+        (x0, y0), (x1, y1) = self.points[0], self.points[-1]
+        return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
+
+    def shape_handle(self, horizontal, vertical):
+        left, top, right, bottom = self.text_box() if self.tool == "text" else self.shape_box()
+        dx, dy = rotate_offset(horizontal * (right - left) / 2, vertical * (bottom - top) / 2, self.angle)
+        return (left + right) / 2 + dx, (top + bottom) / 2 + dy
+
+    def resize_shape(self, handle, dx, dy):
+        horizontal, vertical = handle
+        left, top, right, bottom = self.shape_box()
+        dx, dy = rotate_offset(dx, dy, -self.angle)
+        dx, dy = round(dx), round(dy)
+        new_left = min(left + dx, right - 1) if horizontal < 0 else left
+        new_right = max(right + dx, left + 1) if horizontal > 0 else right
+        new_top = min(top + dy, bottom - 1) if vertical < 0 else top
+        new_bottom = max(bottom + dy, top + 1) if vertical > 0 else bottom
+        if (new_left, new_top, new_right, new_bottom) == (left, top, right, bottom):
+            return self
+
+        # Keep the opposite handle anchored when the shape is rotated.
+        shift_x = (new_left + new_right - left - right) / 2
+        shift_y = (new_top + new_bottom - top - bottom) / 2
+        screen_x, screen_y = rotate_offset(shift_x, shift_y, self.angle)
+        offset_x, offset_y = round(screen_x - shift_x), round(screen_y - shift_y)
+        return replace(self, points=((new_left + offset_x, new_top + offset_y),
+                                     (new_right + offset_x, new_bottom + offset_y)))
+
+    def text_box(self):
+        if len(self.points) > 1:
+            return self.shape_box()
+        x, y = self.points[0]
+        font = image_font(self.font_size, self.font_family, self.bold, self.italic)
+        padding = TEXT_PADDING + self.outline_width
+        box = ImageDraw.Draw(Image.new("L", (1, 1))).multiline_textbbox(
+            (x + padding, y + padding), self.text, font=font, stroke_width=self.outline_width)
+        return x, y, max(x + 8, box[2] + padding), max(y + 8, box[3] + padding)
+
+    def resize_text(self, handle, dx, dy):
+        left, top, right, bottom = self.text_box()
+        width, height = right - left, bottom - top
+        horizontal, vertical = handle
+        dx, dy = rotate_offset(dx, dy, -self.angle)
+        diagonal_x, diagonal_y = horizontal * width, vertical * height
+        scale = 1 + (dx * diagonal_x + dy * diagonal_y) / (width ** 2 + height ** 2)
+        minimum = min(1, max(8 / min(width, height), 8 / self.font_size))
+        scale = max(minimum, min(max(1, 144 / self.font_size), scale))
+        if scale == 1:
+            return self
+        font_size = max(8, min(144, round(self.font_size * scale)))
+        new_width, new_height = max(8, round(width * scale)), max(8, round(height * scale))
+        shift_x, shift_y = rotate_offset(horizontal * (new_width - width) / 2,
+                                         vertical * (new_height - height) / 2, self.angle)
+        x = round(left + (width - new_width) / 2 + shift_x)
+        y = round(top + (height - new_height) / 2 + shift_y)
+        return replace(self, points=((x, y), (x + new_width, y + new_height)), font_size=font_size)
+
     def bounds(self):
         xs, ys = zip(*self.points)
         if self.tool == "text":
-            box = ImageDraw.Draw(Image.new("RGB", (1, 1))).multiline_textbbox(
-                (xs[0], ys[0]), self.text, font=image_font(self.font_size, self.font_family, self.bold, self.italic),
-                stroke_width=self.outline_width)
-            return min(xs[0], box[0]), min(ys[0], box[1]), box[2] + 2, box[3] + 2
+            return self.text_box()
         margin = max(self.width, 14 if self.tool == "number" else 0)
         if self.tool in ("arrow", "double_arrow", "filled_arrow", "outline_arrow"):
             margin = max(margin, self.width * 4, 10)
         elif self.tool == "marker":
             margin = max(margin, self.width * 2, 5)
         return min(xs) - margin, min(ys) - margin, max(xs) + margin + 1, max(ys) + margin + 1
+
+    def visual_bounds(self):
+        bounds = self.bounds()
+        if not self.angle or self.tool not in (*SHAPE_TOOLS, "text"):
+            return bounds
+        cx, cy = self.shape_handle(0, 0)
+        return rotated_box(bounds, (cx + 0.5, cy + 0.5), self.angle)
+
+    def hit(self, point, precise=False):
+        x, y = point
+        left, top, right, bottom = self.bounds()
+        if self.angle and self.tool not in FILTER_TOOLS:
+            cx, cy = (left + right) / 2, (top + bottom) / 2
+            if self.tool in SHAPE_TOOLS or self.tool == "text":
+                cx, cy = self.shape_handle(0, 0)
+            dx, dy = rotate_offset(x - cx, y - cy, -self.angle)
+            x, y = cx + dx, cy + dy
+        tolerance = 4
+        if not (left - tolerance <= x < right + tolerance and top - tolerance <= y < bottom + tolerance):
+            return False
+        if not precise or self.tool == "text":
+            return True
+
+        # Area tools remain grabbable along their edge while their interior can start another mark.
+        mark = self
+        if self.tool in FILTER_TOOLS or self.tool in ("marker_rectangle", "marker_ellipse"):
+            ellipse = self.tool in ("magnify", "marker_ellipse") or self.tool in FILTER_TOOLS and self.elliptical
+            mark = replace(self, tool="ellipse" if ellipse else "rectangle", width=1, filled=False)
+        elif self.tool in SHAPE_TOOLS:
+            mark = replace(self, filled=False)
+        probe = Image.new("RGBA", (2 * tolerance + 1, 2 * tolerance + 1))
+        offset_x, offset_y = round(x) - tolerance, round(y) - tolerance
+        _draw_annotation(ImageDraw.Draw(probe), mark, [(px - offset_x, py - offset_y) for px, py in mark.points])
+        return probe.getbbox() is not None
 
 
 class Annotations:
@@ -294,13 +393,53 @@ class Annotations:
             self._undo.append(self.items)
             self.items = self._redo.pop()
 
-    def hit(self, point):
-        x, y = point
-        for index in reversed(range(len(self.items))):
-            left, top, right, bottom = self.items[index].bounds()
-            if left - 3 <= x < right + 3 and top - 3 <= y < bottom + 3:
+    def hit(self, point, precise=False, tools=None):
+        candidates = [index for index in reversed(range(len(self.items)))
+                      if tools is None or self.items[index].tool in tools]
+        for index in candidates:
+            if self.items[index].hit(point, precise=True):
                 return index
+        if not precise:
+            for index in candidates:
+                if self.items[index].hit(point):
+                    return index
         return None
+
+
+def rotated_box(box, center, angle):
+    left, top, right, bottom = box
+    cx, cy = center
+    xs, ys = zip(*(rotate_offset(x - cx, y - cy, angle)
+                  for x in (left, right) for y in (top, bottom)))
+    return (math.floor(cx + min(xs)), math.floor(cy + min(ys)),
+            math.ceil(cx + max(xs)), math.ceil(cy + max(ys)))
+
+
+def draw_rotated_annotation(result, region, annotation):
+    left, top, right, bottom = region
+    x0, y0, x1, y1 = annotation.visual_bounds()
+    x0, y0, x1, y1 = max(left, x0), max(top, y0), min(right, x1), min(bottom, y1)
+    if x0 >= x1 or y0 >= y1:
+        return
+
+    cx, cy = annotation.shape_handle(0, 0)
+    center = (cx + 0.5, cy + 0.5)
+    angle = -annotation.angle
+    # Render the source pixels needed by the crop, including the bicubic sampling margin.
+    sx0, sy0, sx1, sy1 = rotated_box((x0, y0, x1, y1), center, angle)
+    left_bound, top_bound, right_bound, bottom_bound = annotation.bounds()
+    sx0, sy0 = max(sx0 - 2, left_bound), max(sy0 - 2, top_bound)
+    sx1, sy1 = min(sx1 + 2, right_bound), min(sy1 + 2, bottom_bound)
+    if sx0 >= sx1 or sy0 >= sy1:
+        return
+    layer = Image.new("RGBA", (sx1 - sx0, sy1 - sy0))
+    _draw_annotation(ImageDraw.Draw(layer), annotation, [(x - sx0, y - sy0) for x, y in annotation.points])
+    cosine, sine = rotate_offset(1, 0, angle)
+    tx, ty = rotate_offset(x0 - center[0], y0 - center[1], angle)
+    matrix = (cosine, -sine, tx + center[0] - sx0,
+              sine, cosine, ty + center[1] - sy0)
+    layer = layer.transform((x1 - x0, y1 - y0), AFFINE, matrix, resample=RESAMPLE.BICUBIC)
+    result.alpha_composite(layer, (x0 - left, y0 - top))
 
 
 def render_annotations(base, region, annotations):
@@ -308,8 +447,10 @@ def render_annotations(base, region, annotations):
     left, top = region[:2]
     for annotation in annotations:
         points = [(x - left, y - top) for x, y in annotation.points]
-        if annotation.tool in ("mosaic", "blur", "magnify"):
+        if annotation.tool in FILTER_TOOLS:
             _filter_region(result, annotation, points)
+        elif annotation.angle and annotation.tool in (*SHAPE_TOOLS, "text"):
+            draw_rotated_annotation(result, region, annotation)
         else:
             box = region if annotation.angle else annotation.bounds()
             x0, y0, x1, y1 = max(left, box[0]), max(top, box[1]), min(region[2], box[2]), min(region[3], box[3])
@@ -393,13 +534,29 @@ def _draw_annotation(draw, annotation, points):
             draw.rectangle(box, outline=color, fill=fill, width=width)
     elif tool == "text":
         font = image_font(annotation.font_size, annotation.font_family, annotation.bold, annotation.italic)
+        left, top, right, bottom = annotation.text_box()
+        width, height = right - left, bottom - top
+        padding = TEXT_PADDING + annotation.outline_width
         if annotation.filled:
-            draw.rectangle(draw.multiline_textbbox((x0, y0), annotation.text, font=font), fill="white")
-        draw.multiline_text((x0, y0), annotation.text, font=font, fill=color,
-                            stroke_width=annotation.outline_width, stroke_fill=annotation.outline)
+            draw.rectangle((x0, y0, x0 + width - 1, y0 + height - 1), fill=(255, 255, 255, annotation.opacity))
+        draw.multiline_text((x0 + padding, y0 + padding), wrap_annotation_text(annotation.text, font, width - padding * 2),
+                            font=font, fill=color, stroke_width=annotation.outline_width, stroke_fill=annotation.outline)
     elif tool == "number":
         draw.ellipse((x0 - 14, y0 - 14, x0 + 14, y0 + 14), fill=color)
         draw.text((x0, y0), annotation.text, font=image_font(16), fill="white", anchor="mm")
+
+
+def wrap_annotation_text(text, font, width):
+    lines = []
+    for paragraph in text.split("\n"):
+        line = ""
+        for character in paragraph:
+            if line and font.getlength(line + character) > width:
+                lines.append(line)
+                line = ""
+            line += character
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _stroke(draw, points, color, width, dashed):

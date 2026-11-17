@@ -53,6 +53,7 @@ public sealed partial class CaptureOverlayWindow
 
     private void CompleteCapture(Action<BitmapSource> output, bool saved = false)
     {
+        FinishTextEditor();
         if (!_isSelectionCommitted || _selection.IsEmpty || _refreshing) return;
         try
         {
@@ -96,8 +97,10 @@ public sealed partial class CaptureOverlayWindow
         }
         else if (e.ChangedButton == MouseButton.Right)
         {
+            FinishTextEditor();
+            var point = PointerPosition(e);
             if (_lineStrip is not null) FinishLineStrip();
-            else if (_tool == AnnotationTool.Select && FindAnnotationAt(PointerPosition(e)) is { } element) ShowAnnotationOptions(element);
+            else if (_isSelectionCommitted && FindAnnotationAt(point) is { } element) ShowAnnotationOptions(element);
             else ShowOptions(InputCanvas, System.Windows.Controls.Primitives.PlacementMode.MousePoint);
             e.Handled = true;
         }
@@ -108,6 +111,7 @@ public sealed partial class CaptureOverlayWindow
 
     private void ShowOptions(UIElement target, System.Windows.Controls.Primitives.PlacementMode placement)
     {
+        FinishTextEditor();
         var menu = new ContextMenu { PlacementTarget = target, Placement = placement };
         Add("選取目前螢幕", SelectCurrentScreen, "F");
         Add("選取所有螢幕", () => CommitSelection(CanvasBounds), "Shift+F");
@@ -121,6 +125,11 @@ public sealed partial class CaptureOverlayWindow
         Add("白板", () => SetBoard(CaptureBoard.White), enabled: !_editingSticker, check: _board == CaptureBoard.White);
         Add("透明白板", () => SetBoard(CaptureBoard.Transparent), enabled: !_editingSticker, check: _board == CaptureBoard.Transparent);
         Add("以 DIP 顯示尺寸", () => { _useDip = !_useDip; UpdateSelectionVisual(); }, check: _useDip);
+        Add("文字描邊…", () => TextOutline_Click(this, new RoutedEventArgs()));
+        Add("自訂色盤…", EditPalette);
+        Add("匯入色盤…", ImportPalette);
+        Add("匯出色盤…", ExportPalette);
+        Add("選取／移動", () => SetTool(AnnotationTool.Select), "V", _isSelectionCommitted, _tool == AnnotationTool.Select);
         Add("編號標註", () => SetTool(AnnotationTool.Number), "N", _isSelectionCommitted, _tool == AnnotationTool.Number);
         Add("自由選取標註", () => { _freeSelect = !_freeSelect; if (_freeSelect) SetTool(AnnotationTool.Select); },
             "Shift+拖曳", _isSelectionCommitted, _freeSelect);
@@ -260,6 +269,7 @@ public sealed partial class CaptureOverlayWindow
         ReplayedScreenshot.Visibility = mode == CaptureBoard.Desktop && ReplayedScreenshot.Source is not null
             ? Visibility.Visible : Visibility.Collapsed;
         Background = mode == CaptureBoard.White ? Brushes.White : mode == CaptureBoard.Transparent ? Brushes.LightGray : Brushes.Black;
+        RefreshAnnotationFilters();
     }
 
     private void ReplayHistory(int direction)
@@ -306,8 +316,18 @@ public sealed partial class CaptureOverlayWindow
 
     private void Input_MouseWheel(object sender, MouseWheelEventArgs e)
     {
-        if (_isSelectionCommitted || _editingSticker) return;
-        CycleCandidate(Math.Sign(e.Delta), wrap: false);
+        if (_dragMode != DragMode.None || e.Delta == 0) return;
+        if (_isSelectionCommitted)
+        {
+            if (SelectedResizableShape() is not { } shape) return;
+            ResizeAnnotationWithWheel(shape, e.Delta);
+            UpdatePointerCursor(PointerPosition(e));
+        }
+        else
+        {
+            if (_editingSticker) return;
+            CycleCandidate(Math.Sign(e.Delta), wrap: false);
+        }
         e.Handled = true;
     }
 

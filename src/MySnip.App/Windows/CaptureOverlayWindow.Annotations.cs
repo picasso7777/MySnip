@@ -17,10 +17,20 @@ public sealed partial class CaptureOverlayWindow
 
     private void TextOutline_Click(object sender, RoutedEventArgs e)
     {
+        FinishTextEditor();
+        var selected = SelectedAnnotation() as OutlinedAnnotationText;
+        var currentColor = selected?.Outline is SolidColorBrush brush ? brush.Color : _outlineColor;
+        var currentWidth = selected?.OutlineWidth ?? _outlineWidth;
         var value = InputDialog.Show(this, "文字描邊", "輸入 #AARRGGBB 色碼及粗細，中間用空格分隔。粗細 0 會關閉描邊。",
-            $"{_outlineColor} {_outlineWidth.ToString(CultureInfo.InvariantCulture)}", text => ParseOutline(text, out _, out _));
-        if (value is not null && ParseOutline(value, out var color, out var width))
-        { _outlineColor = color; _outlineWidth = width; }
+            $"{currentColor} {currentWidth.ToString(CultureInfo.InvariantCulture)}", text => ParseOutline(text, out _, out _));
+        if (value is null || !ParseOutline(value, out var color, out var width)) return;
+        if (selected is not null)
+        {
+            if (color != currentColor || width != currentWidth)
+                EditAnnotationValue<(Brush Brush, double Width)>((selected.Outline, currentWidth),
+                    (new SolidColorBrush(color), width), style => selected.SetOutline(style.Brush, style.Width));
+        }
+        else { _outlineColor = color; _outlineWidth = width; }
     }
 
     private static bool ParseOutline(string value, out Color color, out double width)
@@ -64,6 +74,7 @@ public sealed partial class CaptureOverlayWindow
         {
             _lineStrip = new Polyline
             {
+                Tag = AnnotationTool.LineStrip,
                 Stroke = new SolidColorBrush(_drawingColor), StrokeThickness = _drawingWidth,
                 StrokeDashArray = DashedStroke.IsChecked == true ? [3, 2] : null,
                 StrokeLineJoin = PenLineJoin.Round, Opacity = _drawingOpacity
@@ -87,26 +98,11 @@ public sealed partial class CaptureOverlayWindow
         if (!_selectedAnnotations.Contains(element)) SelectAnnotations([element]);
         var menu = new ContextMenu { PlacementTarget = InputCanvas, Placement = System.Windows.Controls.Primitives.PlacementMode.MousePoint };
         if (element is OutlinedAnnotationText text)
-            Add("修改文字…", () =>
-            {
-                var value = InputDialog.Show(this, "修改文字", "輸入標註內容", text.Text, content => content.Length > 0, multiline: true);
-                if (value is null || value == text.Text) return;
-                var original = text.Text;
-                Edit(() => text.Text = value, () => text.Text = original);
-            });
+            Add("修改文字…", () => EditAnnotationText(text));
+        Add("貼上標註（Ctrl+Shift+V）", PasteAnnotations);
         if (element is Shape { Stroke: not null } shape)
-            Add("套用目前畫筆樣式", () =>
-            {
-                var originalStroke = shape.Stroke;
-                var originalWidth = shape.StrokeThickness;
-                var originalOpacity = shape.Opacity;
-                var brush = new SolidColorBrush(_drawingColor);
-                var width = _drawingWidth;
-                var opacity = _drawingOpacity;
-                Edit(() => { shape.Stroke = brush; shape.StrokeThickness = width; shape.Opacity = opacity; },
-                    () => { shape.Stroke = originalStroke; shape.StrokeThickness = originalWidth; shape.Opacity = originalOpacity; });
-            });
-        if (element is not Line)
+            Add("套用目前畫筆樣式", () => ApplyDrawingStyle(shape));
+        if (element is not Image)
         {
             Add("向左旋轉 15°", () => Rotate(-15));
             Add("向右旋轉 15°", () => Rotate(15));
@@ -129,7 +125,7 @@ public sealed partial class CaptureOverlayWindow
 
         void Rotate(double degrees)
         {
-            var transforms = _selectedAnnotations.Where(item => item is not Line).Select(item =>
+            var transforms = _selectedAnnotations.Where(item => item is not Image).Select(item =>
                 (Element: item, Before: item.RenderTransform, Origin: item.RenderTransformOrigin,
                     After: new RotateTransform(((item.RenderTransform as RotateTransform)?.Angle ?? 0) + degrees))).ToArray();
             Edit(() =>
@@ -152,8 +148,16 @@ public sealed partial class CaptureOverlayWindow
     private void Edit(Action apply, Action undo)
     {
         _undo.Execute(new DelegateCommand(apply, undo));
+        RefreshAnnotationEdits();
+    }
+
+    private void RefreshAnnotationEdits()
+    {
+        _selectedAnnotations.RemoveWhere(element => !_annotations.Contains(element));
+        RefreshAnnotationFilters();
         UpdateHistoryButtons();
         UpdateAnnotationOutlines();
+        SyncAnnotationToolbar();
     }
 
     private static void ApplyGaussianBlur(byte[] pixels, int width, int height, int stride, int radius)
